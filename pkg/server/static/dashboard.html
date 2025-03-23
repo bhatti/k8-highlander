@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>K8 Highlander Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            background-color: #f8f9fa;
+        }
+        .pod-row:hover {
+            background-color: rgba(0, 123, 255, 0.1) !important;
+        }
+        .status-error {
+            background-color: #dc3545; /* Bootstrap danger color */
+        }
+
+        .connection-error-notice {
+            border-left: 4px solid #dc3545;
+            background-color: rgba(220, 53, 69, 0.1);
+        }
+        .status-completed {
+            background-color: #0d6efd; /* Bootstrap blue color */
+        }
+        .leader-card {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+        }
+        .follower-card {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+        }
+        .card {
+            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            margin-bottom: 1rem;
+            border-radius: 0.5rem;
+        }
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 5px;
+        }
+        .status-active {
+            background-color: #28a745;
+        }
+        .status-inactive {
+            background-color: #dc3545;
+        }
+        .status-warning {
+            background-color: #ffc107;
+        }
+        .refresh-indicator {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
+        .workload-table th, .workload-table td {
+            padding: 0.5rem;
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .nav-link.active {
+            font-weight: bold;
+        }
+        .tab-pane {
+            padding: 1rem 0;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-cubes me-2"></i>K8 Highlander
+            </a>
+            <div class="d-flex">
+                <span class="badge bg-secondary me-2" id="last-update">Last update: Never</span>
+                <span class="badge bg-danger d-none" id="error-indicator">Error</span>
+                <span class="badge bg-danger d-none" id="connection-status">Disconnected</span>
+                <span class="spinner-border spinner-border-sm text-light d-none" id="loading-indicator"></span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid py-3">
+        <div class="row">
+            <!-- Leader Status Card -->
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card" id="leader-status-card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Leader Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="leader-status-content">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cluster Status Card -->
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Cluster Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="cluster-status-content">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Storage Status Card -->
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Storage Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="storage-status-content">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Workloads Section -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Workloads</h5>
+            </div>
+            <div class="card-body">
+                <ul class="nav nav-tabs" id="workloadTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="all-tab" data-bs-toggle="tab" data-bs-target="#all" type="button" role="tab">All Workloads</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="processes-tab" data-bs-toggle="tab" data-bs-target="#processes" type="button" role="tab">Processes</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="cronjobs-tab" data-bs-toggle="tab" data-bs-target="#cronjobs" type="button" role="tab">CronJobs</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="services-tab" data-bs-toggle="tab" data-bs-target="#services" type="button" role="tab">Services</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="persistent-tab" data-bs-toggle="tab" data-bs-target="#persistent" type="button" role="tab">Persistent</button>
+                    </li>
+                </ul>
+                <div class="tab-content" id="workloadTabContent">
+                    <div class="tab-pane fade show active" id="all" role="tabpanel">
+                        <div id="all-workloads-content">Loading workloads...</div>
+                    </div>
+                    <div class="tab-pane fade" id="processes" role="tabpanel">
+                        <div id="processes-content">Loading processes...</div>
+                    </div>
+                    <div class="tab-pane fade" id="cronjobs" role="tabpanel">
+                        <div id="cronjobs-content">Loading cronjobs...</div>
+                    </div>
+                    <div class="tab-pane fade" id="services" role="tabpanel">
+                        <div id="services-content">Loading services...</div>
+                    </div>
+                    <div class="tab-pane fade" id="persistent" role="tabpanel">
+                        <div id="persistent-content">Loading persistent workloads...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pods Section -->
+        <div class="card mt-3">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Kubernetes Pods</h5>
+            </div>
+            <div class="card-body">
+                <div id="pods-content">Loading pods...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pod Details Modal -->
+    <div class="modal fade" id="podDetailsModal" tabindex="-1" aria-labelledby="podDetailsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="podDetailsModalLabel">Pod Details</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="pod-details-content">
+                    Loading pod details...
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error Modal -->
+    <div class="modal fade" id="errorModal" tabindex="-1" aria-labelledby="errorModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title" id="errorModalLabel">Error</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="error-message">
+                    An error occurred.
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html>

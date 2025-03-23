@@ -1,0 +1,82 @@
+id: ""  # Will use hostname if empty
+tenant: "default"
+port: 8080
+namespace: "default"
+
+# Storage configuration
+storageType: "redis"  # "redis" or "db"
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+databaseURL: ""  # Used if storageType is "db"
+
+# Cluster configuration
+cluster:
+  name: "default"
+  kubeconfig: ""  # Will use in-cluster config if empty
+
+# Workloads configuration
+workloads:
+  processes:
+    - name: "example-process"
+      image: "busybox:latest"
+      script:
+        commands:
+          - "echo 'Starting example process'"
+          - "sleep 3600"
+        shell: "/bin/sh"
+      env:
+        EXAMPLE_VAR: "example-value"
+      resources:
+        cpuRequest: "100m"
+        memoryRequest: "64Mi"
+        cpuLimit: "200m"
+        memoryLimit: "128Mi"
+      restartPolicy: "OnFailure"
+
+  cronJobs:
+    - name: "example-cronjob"
+      schedule: "*/15 * * * *"
+      image: "busybox:latest"
+      script:
+        commands:
+          - "echo 'Running example cron job at $(date)'"
+        shell: "/bin/sh"
+      restartPolicy: "OnFailure"
+
+  services:
+    - name: "example-service"
+      image: "nginx:alpine"
+      replicas: 1
+      ports:
+        - name: "http"
+          containerPort: 80
+          servicePort: 8080
+      resources:
+        cpuRequest: "100m"
+        memoryRequest: "64Mi"
+        cpuLimit: "200m"
+        memoryLimit: "128Mi"
+
+  persistentSets:
+    - name: "example-persistent"
+      image: "postgres:14-alpine"
+      replicas: 1
+      env:
+        POSTGRES_PASSWORD: "example"
+        POSTGRES_USER: "example"
+        POSTGRES_DB: "example"
+      ports:
+        - name: "postgres"
+          containerPort: 5432
+          servicePort: 5432
+      persistentVolumes:
+        - name: "data"
+          mountPath: "/var/lib/postgresql/data"
+          size: "1Gi"
+      resources:
+        cpuRequest: "200m"
+        memoryRequest: "256Mi"
+        cpuLimit: "500m"
+        memoryLimit: "512Mi"
