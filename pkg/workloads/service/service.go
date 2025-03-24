@@ -52,8 +52,8 @@ package service
 import (
 	"context"
 	"fmt"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -226,18 +226,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 				if terminatingTime > 10*time.Second {
 					klog.Warningf("Pod %s stuck in Terminating state for %v, force deleting [elapsed: %s]",
 						pod.Name, terminatingTime, time.Since(startTime))
-
-					// Force delete the pod
-					zero := int64(0)
-					forceErr := common.RetryWithBackoff(ctx, "force delete pod", func() error {
-						return d.client.CoreV1().Pods(d.config.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
-							GracePeriodSeconds: &zero,
-						})
-					})
-
-					if forceErr != nil && !errors.IsNotFound(forceErr) {
-						klog.Errorf("Error force deleting pod %s: %v [elapsed: %s]", pod.Name, forceErr, time.Since(startTime))
-					}
+					common.ForceDeletePod(ctx, d.client, d.config.Namespace, pod.Name)
 				}
 			} else {
 				// Pod exists but doesn't have a deletion timestamp, try to delete it

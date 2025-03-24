@@ -38,7 +38,7 @@ package storage
 
 import (
 	"fmt"
-	"k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/common"
 )
 
 // NewLeaderStorage creates a new leader storage instance based on the provided configuration.

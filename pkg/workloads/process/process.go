@@ -52,8 +52,8 @@ package process
 import (
 	"context"
 	"fmt"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -222,18 +222,7 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 				if terminatingTime > 10*time.Second {
 					klog.Warningf("Pod %s stuck in Terminating state for %v, force deleting [elapsed: %s]",
 						p.podName, terminatingTime, time.Since(startTime))
-
-					// Force delete the pod
-					zero := int64(0)
-					forceErr := common.RetryWithBackoff(ctx, "force delete pod", func() error {
-						return p.client.CoreV1().Pods(p.namespace).Delete(ctx, p.podName, metav1.DeleteOptions{
-							GracePeriodSeconds: &zero,
-						})
-					})
-
-					if forceErr != nil && !errors.IsNotFound(forceErr) {
-						klog.Errorf("Error force deleting pod %s: %v [elapsed: %s]", p.podName, forceErr, time.Since(startTime))
-					}
+					common.ForceDeletePod(ctx, p.client, p.config.Namespace, pod.Name)
 				}
 			}
 
@@ -432,8 +421,8 @@ func (p *ProcessWorkload) buildPod() *corev1.Pod {
 			Namespace:   p.namespace,
 			Labels:      labels,
 			Annotations: p.config.Annotations,
-			// Add a finalizer to prevent immediate deletion
-			Finalizers: []string{"k8-highlander.io/managed-pod"},
+			// Optionally add a finalizer to prevent immediate deletion
+			// Finalizers: []string{"k8-highlander.io/managed-pod"},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicy(p.config.RestartPolicy),

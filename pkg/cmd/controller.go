@@ -50,23 +50,21 @@ package cmd
 
 import (
 	"context"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/leader"
-	"k8-highlander/pkg/monitoring"
-	"k8-highlander/pkg/server"
-	"k8-highlander/pkg/storage"
-	"k8-highlander/pkg/workloads"
-	"k8-highlander/pkg/workloads/cronjob"
-	"k8-highlander/pkg/workloads/persistent"
-	"k8-highlander/pkg/workloads/process"
-	"k8-highlander/pkg/workloads/service"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/leader"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/server"
+	"github.com/bhatti/k8-highlander/pkg/storage"
+	"github.com/bhatti/k8-highlander/pkg/workloads"
+	"github.com/bhatti/k8-highlander/pkg/workloads/cronjob"
+	"github.com/bhatti/k8-highlander/pkg/workloads/persistent"
+	"github.com/bhatti/k8-highlander/pkg/workloads/process"
+	"github.com/bhatti/k8-highlander/pkg/workloads/service"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
-
-	"k8s.io/klog/v2"
 )
 
 // runController initializes and starts all components of the k8-highlander controller.
@@ -136,7 +134,7 @@ func runController() error {
 	)
 
 	// Handle graceful shutdown
-	setupSignalHandler(ctx, cancel, leaderController, monitoringServer, httpServer)
+	setupSignalHandler(ctx, cancel, &appConfig, leaderController, monitoringServer, httpServer)
 
 	// Start the leader election process
 	if err := leaderController.Start(ctx); err != nil {
@@ -263,7 +261,7 @@ func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *
 // 2. Stop the monitoring server
 // 3. Stop the HTTP server
 // 4. Cancel the main context to signal completion
-func setupSignalHandler(_ context.Context, cancel context.CancelFunc,
+func setupSignalHandler(_ context.Context, cancel context.CancelFunc, cfg *common.AppConfig,
 	leaderController *leader.LeaderController,
 	monitoringServer *monitoring.MonitoringServer, httpServer *server.Server) {
 	sigChan := make(chan os.Signal, 1)
@@ -274,7 +272,7 @@ func setupSignalHandler(_ context.Context, cancel context.CancelFunc,
 		klog.Infof("Received signal %s, initiating shutdown...", sig)
 
 		// Stop leader controller first
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.TerminationGracePeriod)
 		defer shutdownCancel()
 
 		klog.Infof("Stopping leader controller (isLeader: %v)...", leaderController.IsLeader())

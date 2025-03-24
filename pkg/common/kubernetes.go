@@ -42,9 +42,11 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"time"
 )
@@ -112,4 +114,48 @@ func RetryWithBackoff(ctx context.Context, operation string, fn func() error) er
 		klog.V(4).Infof("Retrying %s due to error: %v", operation, err)
 		return false, nil
 	})
+}
+
+// ForceDeletePod attempts to force delete a pod, first by removing finalizers, then using gracePeriodSeconds=0
+func ForceDeletePod(ctx context.Context, client kubernetes.Interface, namespace, podName string) error {
+	klog.Warningf("Force deleting pod %s/%s", namespace, podName)
+
+	// First try to remove finalizers if present
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		pod, err := client.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return nil // Pod is already gone
+		}
+		if err != nil {
+			return err
+		}
+
+		// If pod has finalizers, remove them
+		if len(pod.Finalizers) > 0 {
+			klog.Infof("Removing finalizers from pod %s/%s: %v", namespace, podName, pod.Finalizers)
+			podCopy := pod.DeepCopy()
+			podCopy.Finalizers = nil
+			_, err = client.CoreV1().Pods(namespace).Update(ctx, podCopy, metav1.UpdateOptions{})
+			return err
+		}
+		return nil
+	})
+
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Warningf("Failed to remove finalizers from pod %s/%s: %v", namespace, podName, err)
+		// Continue with force delete anyway
+	}
+
+	// Now force delete with gracePeriodSeconds=0
+	zero := int64(0)
+	err = client.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &[]metav1.DeletionPropagation{metav1.DeletePropagationBackground}[0],
+	})
+
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to force delete pod %s/%s: %w", namespace, podName, err)
+	}
+
+	return nil
 }

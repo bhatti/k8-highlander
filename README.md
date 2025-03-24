@@ -236,7 +236,8 @@ K8 Highlander provides a built-in dashboard and Prometheus metrics for monitorin
 
 Access the dashboard at `http://<controller-address>:8080/`
 
-![Dashboard Screenshot](docs/images/dashboard.png)
+![Leader Dashboard Screenshot](docs/images/dashboard-leader.png)
+![Follower Dashboard Screenshot](docs/images/dashboard-follower.png)
 
 ### Prometheus Metrics
 

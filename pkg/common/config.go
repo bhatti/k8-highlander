@@ -153,9 +153,9 @@ type StorageConfig struct {
 type AppConfig struct {
 	// General configuration
 	ID        string `yaml:"id"`
-	Namespace string `json:"namespace"`
+	Namespace string `yaml:"namespace"`
 	Tenant    string `yaml:"tenant"`
-	Port      int    `yaml:"port"`
+	Port      int    `yaml:"port" env:"PORT"`
 
 	StorageType StorageType `yaml:"storageType" env:"STORAGE_TYPE"`
 
@@ -178,6 +178,8 @@ type AppConfig struct {
 		Services       []ServiceConfig    `yaml:"services"`
 		PersistentSets []PersistentConfig `yaml:"persistentSets"`
 	} `yaml:"workloads"`
+
+	TerminationGracePeriod time.Duration `json:"terminationGracePeriod,omitempty" yaml:"terminationGracePeriod,omitempty"`
 }
 
 func (c *AppConfig) BuildStorageConfig() (_ *StorageConfig, err error) {

@@ -41,8 +41,8 @@ package persistent
 import (
 	"context"
 	"fmt"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"os"
 	"path/filepath"
 	"sync"

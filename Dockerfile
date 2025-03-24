@@ -14,7 +14,7 @@ COPY . .
 ARG VERSION=dev
 ARG BUILD_TIME=unknown
 # Build the application - using the correct path to main.go
-RUN go build -ldflags "-X k8-highlander/pkg/common.VERSION=${VERSION} -X k8-highlander/pkg/common.BuildInfo=${BUILD_TIME}" -o bin/k8-highlander ./cmd/main.go
+RUN go build -ldflags "-X github.com/bhatti/k8-highlander/pkg/common.VERSION=${VERSION} -X github.com/bhatti/k8-highlander/pkg/common.BuildInfo=${BUILD_TIME}" -o bin/k8-highlander ./cmd/main.go
 # Runtime stage
 FROM alpine:3.18
 # Install runtime dependencies

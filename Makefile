@@ -10,7 +10,7 @@ GOLINT=golangci-lint
 BINARY_NAME=k8-highlander
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
-LDFLAGS=-ldflags "-X k8-highlander/pkg/common.VERSION=$(VERSION) -X k8-highlander/pkg/common.BuildInfo=$(BUILD_TIME)"
+LDFLAGS=-ldflags "-X github.com/bhatti/k8-highlander/pkg/common.VERSION=$(VERSION) -X github.com/bhatti/k8-highlander/pkg/common.BuildInfo=$(BUILD_TIME)"
 # Source files
 SRC=$(shell find . -name "*.go" -type f)
 PKG_LIST=$(shell go list ./... | grep -v /vendor/)

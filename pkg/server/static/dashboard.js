@@ -359,8 +359,7 @@ class StatefulDashboard {
 
         // Determine storage type and connection status
         const storageType = dbInfo.type || status.storageType || 'redis';
-        const isConnected = (storageType === 'redis') ? status.redisConnected :
-            (storageType === 'db') ? status.dbConnected || dbInfo.connected : false;
+        const isConnected = dbInfo.connected || status.dbConnected || false;
 
         // Format storage type for display
         let storageTypeDisplay = 'Database';

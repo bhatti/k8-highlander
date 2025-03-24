@@ -302,6 +302,9 @@ func (cfg *AppConfig) Validate() error {
 	if cfg.Namespace == "" {
 		cfg.Namespace = "default"
 	}
+	if cfg.TerminationGracePeriod.Seconds() <= 5 {
+		cfg.TerminationGracePeriod = time.Second * 35
+	}
 	// Validate storage type
 	if cfg.StorageType != "" && cfg.StorageType != StorageTypeRedis && cfg.StorageType != StorageTypeDB {
 		return fmt.Errorf("invalid storage type: %s", cfg.StorageType)

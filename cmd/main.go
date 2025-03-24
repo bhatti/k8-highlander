@@ -1,8 +1,8 @@
 package main
 
 import (
-	"k8-highlander/pkg/cmd"
-	"k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/cmd"
+	"github.com/bhatti/k8-highlander/pkg/common"
 )
 
 func init() {

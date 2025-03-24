@@ -41,9 +41,9 @@ package cmd
 
 import (
 	"fmt"
+	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"k8-highlander/pkg/common"
 	"k8s.io/klog/v2"
 	"os"
 )

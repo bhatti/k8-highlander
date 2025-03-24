@@ -40,9 +40,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/workloads"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/workloads"
 	"k8s.io/client-go/kubernetes"
 	"net/http"
 	"runtime"
@@ -51,7 +51,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
 )
 
 // Server represents the HTTP server for the controller
@@ -82,7 +82,7 @@ func NewServer(config *common.AppConfig, monitoringServer *monitoring.Monitoring
 }
 
 // Start starts the HTTP server
-func (s *Server) Start(ctx context.Context, workloadManager workloads.Manager,
+func (s *Server) Start(_ context.Context, workloadManager workloads.Manager,
 	k8sClient kubernetes.Interface, namespace string) error {
 	mux := http.NewServeMux()
 
@@ -319,8 +319,9 @@ func (s *Server) readyzHandler(w http.ResponseWriter, _ *http.Request) {
 
 // determineNotReadyReason returns a reason why the service is not ready
 func (s *Server) determineNotReadyReason(status monitoring.HealthStatus) string {
-	if !status.IsLeader && time.Since(status.LastLeaderTransition) < 30*time.Second {
-		return "recent leadership change"
+	if !status.IsLeader && time.Since(status.LastLeaderTransition) < s.config.TerminationGracePeriod {
+		return "recent leadership change" +
+			""
 	}
 
 	if !status.DBConnected {

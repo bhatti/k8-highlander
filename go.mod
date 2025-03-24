@@ -1,6 +1,8 @@
-module k8-highlander
+module github.com/bhatti/k8-highlander
 
 go 1.23.0
+
+toolchain go1.24.1
 
 require (
 	github.com/alicebob/miniredis/v2 v2.34.0

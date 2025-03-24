@@ -49,16 +49,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"gopkg.in/yaml.v3"
-	"k8-highlander/pkg/common"
-	"k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
 
-	"k8-highlander/pkg/workloads/cronjob"
-	"k8-highlander/pkg/workloads/persistent"
-	"k8-highlander/pkg/workloads/process"
-	"k8-highlander/pkg/workloads/service"
+	"github.com/bhatti/k8-highlander/pkg/workloads/cronjob"
+	"github.com/bhatti/k8-highlander/pkg/workloads/persistent"
+	"github.com/bhatti/k8-highlander/pkg/workloads/process"
+	"github.com/bhatti/k8-highlander/pkg/workloads/service"
 )
 
 // WorkloadFactory creates workloads from configuration files or programmatic definitions.

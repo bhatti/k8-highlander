@@ -48,7 +48,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/go-redis/redis/v8"
-	"k8-highlander/pkg/common"
+	"github.com/bhatti/k8-highlander/pkg/common"
 	"strings"
 	"sync"
 	"time"
