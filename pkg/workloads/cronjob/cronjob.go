@@ -333,7 +333,10 @@ func (c *CronJobWorkload) createOrUpdateCronJob(ctx context.Context, suspend boo
 
 		if errors.IsNotFound(err) {
 			// Create new cron job
-			cronJob := c.buildCronJob(suspend)
+			cronJob, err := c.buildCronJob(suspend)
+			if err != nil {
+				return fmt.Errorf("failed to create cron job: %w", err)
+			}
 			_, err = c.client.BatchV1().CronJobs(c.config.Namespace).Create(ctx, cronJob, metav1.CreateOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to create cron job: %w", err)
@@ -389,7 +392,7 @@ func (c *CronJobWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				c.updateStatus(func(s *common.WorkloadStatus) {
-					s.Healthy = true
+					s.Healthy = c.monitoringServer.GetHealthStatus().IsLeader
 					s.LastError = ""
 				})
 			}
@@ -421,7 +424,7 @@ func (c *CronJobWorkload) checkHealth(ctx context.Context) error {
 		s.Details["lastScheduleTime"] = cronJob.Status.LastScheduleTime
 		s.Details["activeJobs"] = len(cronJob.Status.Active)
 		s.Active = !*cronJob.Spec.Suspend
-		s.Healthy = true
+		s.Healthy = c.monitoringServer.GetHealthStatus().IsLeader
 
 		// Check if there are any active jobs
 		if len(cronJob.Status.Active) > 0 {
@@ -446,8 +449,11 @@ func (c *CronJobWorkload) checkHealth(ctx context.Context) error {
 }
 
 // buildCronJob builds a Kubernetes CronJob from the config
-func (c *CronJobWorkload) buildCronJob(suspend bool) *batchv1.CronJob {
-	labels, containers := c.config.BuildContainers(c.monitoringServer.GetLeaderInfo())
+func (c *CronJobWorkload) buildCronJob(suspend bool) (*batchv1.CronJob, error) {
+	labels, containers, err := c.config.BuildContainers(c.monitoringServer.GetLeaderInfo())
+	if err != nil {
+		return nil, err
+	}
 	// Create the cron job
 	cronJob := &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
@@ -487,7 +493,7 @@ func (c *CronJobWorkload) buildCronJob(suspend bool) *batchv1.CronJob {
 	// Add Secret volumes
 	common.AddSecretVolumes(&cronJob.Spec.JobTemplate.Spec.Template.Spec, &cronJob.Spec.JobTemplate.Spec.Template.Spec.Containers[0], c.config.Secrets)
 
-	return cronJob
+	return cronJob, nil
 }
 
 // updateStatus updates the workload status

@@ -44,9 +44,9 @@ package process
 import (
 	"context"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"gopkg.in/yaml.v3"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"os"

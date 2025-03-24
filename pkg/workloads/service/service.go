@@ -91,7 +91,7 @@ func NewServiceWorkload(config common.ServiceConfig, metrics *monitoring.Control
 		config.ReadinessTimeout = 5 * time.Minute
 	}
 	if config.TerminationGracePeriod == 0 {
-		config.TerminationGracePeriod = 30
+		config.TerminationGracePeriod = 28
 	}
 
 	return &ServiceWorkload{
@@ -223,7 +223,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 		for _, pod := range pods.Items {
 			if pod.DeletionTimestamp != nil {
 				terminatingTime := time.Since(pod.DeletionTimestamp.Time)
-				if terminatingTime > 10*time.Second {
+				if terminatingTime > d.config.TerminationGracePeriod/3+time.Second {
 					if err = common.ForceDeletePod(ctx, d.client, d.config.Namespace, pod.Name); err != nil {
 						klog.Errorf("Pod %s stuck in Terminating state for %v, force deleting failed: %s [elapsed: %s]",
 							pod.Name, terminatingTime, err, time.Since(startTime))
@@ -278,7 +278,10 @@ func (d *ServiceWorkload) GetType() common.WorkloadType {
 // createOrUpdateDeployment creates or updates the deployment
 func (d *ServiceWorkload) createOrUpdateDeployment(ctx context.Context) error {
 	// Convert config to Kubernetes Deployment
-	deployment := d.buildDeployment()
+	deployment, err := d.buildDeployment()
+	if err != nil {
+		return fmt.Errorf("failed to create deployment: %w", err)
+	}
 
 	// Try to get existing deployment
 	existing, err := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
@@ -379,7 +382,7 @@ func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				d.updateStatus(func(s *common.WorkloadStatus) {
-					s.Healthy = true
+					s.Healthy = d.monitoringServer.GetHealthStatus().IsLeader
 					s.LastError = ""
 				})
 			}
@@ -411,7 +414,7 @@ func (d *ServiceWorkload) checkHealth(ctx context.Context) error {
 		s.Details["readyReplicas"] = deployment.Status.ReadyReplicas
 		s.Details["updatedReplicas"] = deployment.Status.UpdatedReplicas
 		s.Active = isActive
-		s.Healthy = isReady
+		s.Healthy = isActive && isReady
 
 		if !isReady && isActive {
 			s.LastError = fmt.Sprintf("deployment not ready: %d/%d replicas available",
@@ -435,8 +438,11 @@ func (d *ServiceWorkload) checkHealth(ctx context.Context) error {
 }
 
 // buildDeployment builds a Kubernetes Deployment from the config
-func (d *ServiceWorkload) buildDeployment() *appsv1.Deployment {
-	labels, containers := d.config.BuildContainers(d.monitoringServer.GetLeaderInfo())
+func (d *ServiceWorkload) buildDeployment() (*appsv1.Deployment, error) {
+	labels, containers, err := d.config.BuildContainers(d.monitoringServer.GetLeaderInfo())
+	if err != nil {
+		return nil, err
+	}
 
 	terminationSecs := int64(d.config.TerminationGracePeriod.Seconds())
 	// Create the deployment
@@ -507,7 +513,7 @@ func (d *ServiceWorkload) buildDeployment() *appsv1.Deployment {
 	// Add Secret volumes
 	common.AddSecretVolumes(&deployment.Spec.Template.Spec, &deployment.Spec.Template.Spec.Containers[0], d.config.Secrets)
 
-	return deployment
+	return deployment, nil
 }
 
 // updateStatus updates the workload status

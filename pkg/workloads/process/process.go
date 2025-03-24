@@ -89,7 +89,7 @@ func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.Control
 	}
 	// Set defaults
 	if config.TerminationGracePeriod == 0 {
-		config.TerminationGracePeriod = 30 * time.Second
+		config.TerminationGracePeriod = 28 * time.Second
 	}
 	if config.RestartPolicy == "" {
 		config.RestartPolicy = "Never" // OnFailure - this recreates pod on stop
@@ -106,7 +106,7 @@ func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.Control
 			Name:    config.Name,
 			Type:    common.WorkloadTypeProcess,
 			Active:  false,
-			Healthy: true,
+			Healthy: false,
 			Details: make(map[string]interface{}),
 		},
 	}, nil
@@ -357,7 +357,10 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 		p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
 	startTime := time.Now()
 	// Build the pod
-	pod := p.buildPod()
+	pod, err := p.buildPod()
+	if err != nil {
+		return fmt.Errorf("failed to create pod: %w", err)
+	}
 
 	// Check if pod already exists
 	existing, err := p.client.CoreV1().Pods(p.namespace).Get(ctx, p.podName, metav1.GetOptions{})
@@ -413,9 +416,11 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 }
 
 // buildPod builds a Kubernetes Pod for the process
-func (p *ProcessWorkload) buildPod() *corev1.Pod {
-	labels, containers := p.config.BuildContainers(p.monitoringServer.GetLeaderInfo())
-
+func (p *ProcessWorkload) buildPod() (*corev1.Pod, error) {
+	labels, containers, err := p.config.BuildContainers(p.monitoringServer.GetLeaderInfo())
+	if err != nil {
+		return nil, err
+	}
 	// Create the pod
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -455,14 +460,13 @@ func (p *ProcessWorkload) buildPod() *corev1.Pod {
 			FailureThreshold:    3,
 		}
 	}
-	return pod
+	return pod, nil
 }
 
 // monitorPod monitors the pod status
 func (p *ProcessWorkload) monitorPod(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -523,7 +527,7 @@ func (p *ProcessWorkload) updatePodStatus(pod *corev1.Pod) {
 				}
 			}
 
-			s.Healthy = allReady
+			s.Healthy = allReady && p.monitoringServer.GetHealthStatus().IsLeader
 
 			if !allReady {
 				s.LastError = "Not all containers are ready"
@@ -532,7 +536,7 @@ func (p *ProcessWorkload) updatePodStatus(pod *corev1.Pod) {
 			}
 		} else if pod.Status.Phase == corev1.PodSucceeded {
 			s.Active = false
-			s.Healthy = true
+			s.Healthy = p.monitoringServer.GetHealthStatus().IsLeader
 			s.LastError = ""
 		} else if pod.Status.Phase == corev1.PodFailed {
 			s.Active = false

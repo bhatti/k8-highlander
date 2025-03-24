@@ -61,7 +61,7 @@ func (e ValidationError) Error() string {
 // Validate validates a process configuration
 func (cfg *ProcessConfig) Validate(defNS string) []ValidationError {
 	if cfg.TerminationGracePeriod.Seconds() <= 0 {
-		cfg.TerminationGracePeriod = time.Second * 30
+		cfg.TerminationGracePeriod = time.Second * 28
 	}
 	if cfg.MaxRestarts <= 0 {
 		cfg.MaxRestarts = 5
@@ -109,7 +109,7 @@ func (cfg *ProcessConfig) Validate(defNS string) []ValidationError {
 // Validate validates a cron job configuration
 func (cfg *CronJobConfig) Validate(defNS string) []ValidationError {
 	if cfg.TerminationGracePeriod.Seconds() <= 0 {
-		cfg.TerminationGracePeriod = time.Second * 30
+		cfg.TerminationGracePeriod = time.Second * 28
 	}
 	var errors []ValidationError
 
@@ -161,7 +161,7 @@ func (cfg *CronJobConfig) Validate(defNS string) []ValidationError {
 // Validate validates a service deployment configuration
 func (cfg *ServiceConfig) Validate(defNS string) []ValidationError {
 	if cfg.TerminationGracePeriod.Seconds() <= 0 {
-		cfg.TerminationGracePeriod = time.Second * 30
+		cfg.TerminationGracePeriod = time.Second * 28
 	}
 	var errors []ValidationError
 
@@ -213,7 +213,7 @@ func (cfg *ServiceConfig) Validate(defNS string) []ValidationError {
 // Validate validates a stateful set configuration
 func (cfg *PersistentConfig) Validate(defNS string) []ValidationError {
 	if cfg.TerminationGracePeriod.Seconds() <= 0 {
-		cfg.TerminationGracePeriod = time.Second * 30
+		cfg.TerminationGracePeriod = time.Second * 28
 	}
 	var errors []ValidationError
 
@@ -303,7 +303,7 @@ func (cfg *AppConfig) Validate() error {
 		cfg.Namespace = "default"
 	}
 	if cfg.TerminationGracePeriod.Seconds() <= 5 {
-		cfg.TerminationGracePeriod = time.Second * 35
+		cfg.TerminationGracePeriod = time.Second * 29
 	}
 	// Validate storage type
 	if cfg.StorageType != "" && cfg.StorageType != StorageTypeRedis && cfg.StorageType != StorageTypeDB {

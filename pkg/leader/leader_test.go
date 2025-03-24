@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	ierrors "errors"
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"gopkg.in/yaml.v3"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"github.com/bhatti/k8-highlander/pkg/storage"
@@ -14,6 +12,8 @@ import (
 	"github.com/bhatti/k8-highlander/pkg/workloads/cronjob"
 	"github.com/bhatti/k8-highlander/pkg/workloads/process"
 	"github.com/bhatti/k8-highlander/pkg/workloads/service"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -33,7 +33,6 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	v1 "k8s.io/api/core/v1"
@@ -2192,68 +2191,69 @@ func TestProcessConfigYAMLParsing(t *testing.T) {
 
 	// Verify the main process config
 	config := configs[0]
-	assert.Equal(t, "echo-process-0", config.Name, "Process name should match")
-	assert.Equal(t, "busybox:latest", config.Image, "Image should match")
+	require.Equal(t, "echo-process-0", config.Name, "Process name should match")
+	require.Equal(t, "busybox:latest", config.Image, "Image should match")
 
 	// Verify resource requirements
-	assert.Equal(t, "250m", config.Resources.CPURequest, "CPU request should match")
-	assert.Equal(t, "512Mi", config.Resources.MemoryRequest, "Memory request should match")
-	assert.Equal(t, "500m", config.Resources.CPULimit, "CPU limit should match")
-	assert.Equal(t, "1Gi", config.Resources.MemoryLimit, "Memory limit should match")
+	require.Equal(t, "250m", config.Resources.CPURequest, "CPU request should match")
+	require.Equal(t, "512Mi", config.Resources.MemoryRequest, "Memory request should match")
+	require.Equal(t, "500m", config.Resources.CPULimit, "CPU limit should match")
+	require.Equal(t, "1Gi", config.Resources.MemoryLimit, "Memory limit should match")
 
 	// Verify sidecars
 	require.Len(t, config.Sidecars, 1, "Should have 1 sidecar")
 	sidecar := config.Sidecars[0]
-	assert.Equal(t, "sidecar", sidecar.Name, "Sidecar name should match")
-	assert.Equal(t, "busybox:latest", sidecar.Image, "Sidecar image should match")
+	require.Equal(t, "sidecar", sidecar.Name, "Sidecar name should match")
+	require.Equal(t, "busybox:latest", sidecar.Image, "Sidecar image should match")
 
 	// Verify sidecar resources
-	assert.Equal(t, "250m", sidecar.Resources.CPURequest, "Sidecar CPU request should match")
-	assert.Equal(t, "512Mi", sidecar.Resources.MemoryRequest, "Sidecar memory request should match")
-	assert.Equal(t, "500m", sidecar.Resources.CPULimit, "Sidecar CPU limit should match")
-	assert.Equal(t, "1Gi", sidecar.Resources.MemoryLimit, "Sidecar memory limit should match")
+	require.Equal(t, "250m", sidecar.Resources.CPURequest, "Sidecar CPU request should match")
+	require.Equal(t, "512Mi", sidecar.Resources.MemoryRequest, "Sidecar memory request should match")
+	require.Equal(t, "500m", sidecar.Resources.CPULimit, "Sidecar CPU limit should match")
+	require.Equal(t, "1Gi", sidecar.Resources.MemoryLimit, "Sidecar memory limit should match")
 
 	// Test building resource requirements
 	k8sResources := config.Resources.BuildResourceRequirements()
-	assert.NotNil(t, k8sResources.Requests, "Resource requests should not be nil")
-	assert.NotNil(t, k8sResources.Limits, "Resource limits should not be nil")
+	require.NotNil(t, k8sResources.Requests, "Resource requests should not be nil")
+	require.NotNil(t, k8sResources.Limits, "Resource limits should not be nil")
 
 	// Verify CPU request
 	cpuRequest, exists := k8sResources.Requests["cpu"]
-	assert.True(t, exists, "CPU request should exist")
-	assert.Equal(t, "250m", cpuRequest.String(), "CPU request value should match")
+	require.True(t, exists, "CPU request should exist")
+	require.Equal(t, "250m", cpuRequest.String(), "CPU request value should match")
 
 	// Verify memory request
 	memRequest, exists := k8sResources.Requests["memory"]
-	assert.True(t, exists, "Memory request should exist")
-	assert.Equal(t, "512Mi", memRequest.String(), "Memory request value should match")
+	require.True(t, exists, "Memory request should exist")
+	require.Equal(t, "512Mi", memRequest.String(), "Memory request value should match")
 
 	// Verify CPU limit
 	cpuLimit, exists := k8sResources.Limits["cpu"]
-	assert.True(t, exists, "CPU limit should exist")
-	assert.Equal(t, "500m", cpuLimit.String(), "CPU limit value should match")
+	require.True(t, exists, "CPU limit should exist")
+	require.Equal(t, "500m", cpuLimit.String(), "CPU limit value should match")
 
 	// Verify memory limit
 	memLimit, exists := k8sResources.Limits["memory"]
-	assert.True(t, exists, "Memory limit should exist")
-	assert.Equal(t, "1Gi", memLimit.String(), "Memory limit value should match")
+	require.True(t, exists, "Memory limit should exist")
+	require.Equal(t, "1Gi", memLimit.String(), "Memory limit value should match")
 
 	// Test building containers
-	labels, containers := config.BuildContainers(common.LocalLeaderInfo{})
-	assert.NotEmpty(t, labels, "Labels should not be empty")
-	assert.Len(t, containers, 2, "Should have 2 containers (main + sidecar)")
+	labels, containers, err := config.BuildContainers(common.LocalLeaderInfo{IsLeader: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, labels, "Labels should not be empty")
+	require.Len(t, containers, 2, "Should have 2 containers (main + sidecar)")
 
 	// Verify main container resources
 	mainContainer := containers[0]
-	assert.Equal(t, "main", mainContainer.Name, "Main container name should be 'main'")
-	assert.NotNil(t, mainContainer.Resources.Requests, "Main container resource requests should not be nil")
-	assert.NotNil(t, mainContainer.Resources.Limits, "Main container resource limits should not be nil")
+	require.Equal(t, "main", mainContainer.Name, "Main container name should be 'main'")
+	require.NotNil(t, mainContainer.Resources.Requests, "Main container resource requests should not be nil")
+	require.NotNil(t, mainContainer.Resources.Limits, "Main container resource limits should not be nil")
 
 	// Verify sidecar container resources
 	sidecarContainer := containers[1]
-	assert.Equal(t, "sidecar", sidecarContainer.Name, "Sidecar container name should match")
-	assert.NotNil(t, sidecarContainer.Resources.Requests, "Sidecar container resource requests should not be nil")
-	assert.NotNil(t, sidecarContainer.Resources.Limits, "Sidecar container resource limits should not be nil")
+	require.Equal(t, "sidecar", sidecarContainer.Name, "Sidecar container name should match")
+	require.NotNil(t, sidecarContainer.Resources.Requests, "Sidecar container resource requests should not be nil")
+	require.NotNil(t, sidecarContainer.Resources.Limits, "Sidecar container resource limits should not be nil")
 }
 
 // TestProcessManagerWithMultipleProcesses tests the ProcessManager with multiple processes

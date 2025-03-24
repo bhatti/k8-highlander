@@ -48,9 +48,9 @@ package workloads
 import (
 	"encoding/json"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"gopkg.in/yaml.v3"
 	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"

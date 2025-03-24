@@ -322,7 +322,10 @@ func (s *PersistentWorkload) createOrUpdateService(ctx context.Context) error {
 // createOrUpdateStatefulSet creates or updates the persistent set
 func (s *PersistentWorkload) createOrUpdateStatefulSet(ctx context.Context) error {
 	// Build persistent set
-	statefulSet := s.buildStatefulSet()
+	statefulSet, err := s.buildStatefulSet()
+	if err != nil {
+		return fmt.Errorf("failed to create persistent set: %w", err)
+	}
 
 	// Try to get existing stateful set
 	existing, err := s.client.AppsV1().StatefulSets(s.config.Namespace).Get(ctx, s.config.Name, metav1.GetOptions{})
@@ -422,7 +425,7 @@ func (s *PersistentWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				s.updateStatus(func(status *common.WorkloadStatus) {
-					status.Healthy = true
+					status.Healthy = s.monitoringServer.GetHealthStatus().IsLeader
 					status.LastError = ""
 				})
 			}
@@ -522,9 +525,11 @@ func (s *PersistentWorkload) buildService() *corev1.Service {
 }
 
 // buildStatefulSet builds a Kubernetes StatefulSet from the config
-func (s *PersistentWorkload) buildStatefulSet() *appsv1.StatefulSet {
-	labels, containers := s.config.BuildContainers(s.monitoringServer.GetLeaderInfo())
-
+func (s *PersistentWorkload) buildStatefulSet() (*appsv1.StatefulSet, error) {
+	labels, containers, err := s.config.BuildContainers(s.monitoringServer.GetLeaderInfo())
+	if err != nil {
+		return nil, err
+	}
 	// Create the stateful set
 	replicas := s.config.Replicas
 	statefulSet := &appsv1.StatefulSet{
@@ -636,7 +641,7 @@ func (s *PersistentWorkload) buildStatefulSet() *appsv1.StatefulSet {
 		statefulSet.Spec.VolumeClaimTemplates = volumeClaimTemplates
 	}
 
-	return statefulSet
+	return statefulSet, nil
 }
 
 // updateStatus updates the workload status

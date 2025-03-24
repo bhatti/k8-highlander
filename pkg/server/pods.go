@@ -46,16 +46,16 @@ import (
 
 // PodInfo represents simplified pod information for the dashboard
 type PodInfo struct {
-	Name        string            `json:"name"`
-	Namespace   string            `json:"namespace"`
-	Status      string            `json:"status"`
-	Node        string            `json:"node"`
-	Age         string            `json:"age"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	LeaderID    string            `json:"leaderId"`
-	ClusterName string            `json:"clusterName"`
-	Labels      map[string]string `json:"labels"`
-	Annotations map[string]string `json:"annotations"`
+	Name         string            `json:"name"`
+	Namespace    string            `json:"namespace"`
+	Status       string            `json:"status"`
+	Node         string            `json:"node"`
+	Age          string            `json:"age"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	ControllerID string            `json:"controllerId"`
+	ClusterName  string            `json:"clusterName"`
+	Labels       map[string]string `json:"labels"`
+	Annotations  map[string]string `json:"annotations"`
 }
 
 // SetupPodEndpoints adds Kubernetes pod-related API endpoints
@@ -115,16 +115,16 @@ func listPods(ctx context.Context, client kubernetes.Interface, namespace string
 		}
 
 		pods = append(pods, PodInfo{
-			Name:        pod.Name,
-			Namespace:   pod.Namespace,
-			Status:      string(pod.Status.Phase),
-			Node:        pod.Spec.NodeName,
-			Age:         formatDuration(age),
-			CreatedAt:   pod.CreationTimestamp.Time,
-			LeaderID:    leaderID,
-			ClusterName: clusterName,
-			Labels:      pod.Labels,
-			Annotations: pod.Annotations,
+			Name:         pod.Name,
+			Namespace:    pod.Namespace,
+			Status:       string(pod.Status.Phase),
+			Node:         pod.Spec.NodeName,
+			Age:          formatDuration(age),
+			CreatedAt:    pod.CreationTimestamp.Time,
+			ControllerID: leaderID,
+			ClusterName:  clusterName,
+			Labels:       pod.Labels,
+			Annotations:  pod.Annotations,
 		})
 	}
 

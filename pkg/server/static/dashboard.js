@@ -739,7 +739,7 @@ class StatefulDashboard {
         }
 
         let html = '<div class="table-responsive"><table class="table table-striped table-hover">';
-        html += '<thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Node</th><th>Leader ID</th><th>Cluster</th><th>Age</th></tr></thead><tbody>';
+        html += '<thead><tr><th>Name</th><th>Namespace</th><th>Status</th><th>Node</th><th>Controller ID</th><th>Cluster</th><th>Age</th></tr></thead><tbody>';
 
         for (const pod of pods) {
             // Determine status class and display text
@@ -768,7 +768,7 @@ class StatefulDashboard {
             }
 
             // Get leader ID and cluster name, with fallbacks
-            const leaderId = pod.leaderId || this.getLeaderIdFromLabelsOrAnnotations(pod) || 'N/A';
+            const controllerId = pod.controllerId || this.getControllerFromLabelsOrAnnotations(pod) || 'N/A';
             const clusterName = pod.clusterName || this.getClusterNameFromLabelsOrAnnotations(pod) || 'N/A';
 
             // Store pod data as a data attribute for the modal
@@ -780,7 +780,7 @@ class StatefulDashboard {
             <td>${pod.namespace}</td>
             <td><span class="status-indicator ${statusClass}"></span>${statusText}</td>
             <td>${pod.node || 'N/A'}</td>
-            <td>${leaderId}</td>
+            <td>${controllerId}</td>
             <td>${clusterName}</td>
             <td>${pod.age || 'N/A'}</td>
         </tr>
@@ -823,7 +823,7 @@ class StatefulDashboard {
                         <p><strong>Node:</strong> ${pod.node || 'N/A'}</p>
                     </div>
                     <div class="col-md-6">
-                        <p><strong>Leader ID:</strong> ${pod.leaderId || this.getLeaderIdFromLabelsOrAnnotations(pod) || 'N/A'}</p>
+                        <p><strong>Leader ID:</strong> ${pod.leaderId || this.getControllerFromLabelsOrAnnotations(pod) || 'N/A'}</p>
                         <p><strong>Cluster Name:</strong> ${pod.clusterName || this.getClusterNameFromLabelsOrAnnotations(pod) || 'N/A'}</p>
                         <p><strong>Age:</strong> ${pod.age || 'N/A'}</p>
                         <p><strong>Created:</strong> ${pod.createdAt ? new Date(pod.createdAt).toLocaleString() : 'N/A'}</p>
@@ -910,8 +910,8 @@ class StatefulDashboard {
         podDetailsModal.show();
     }
 
-    // Helper methods to extract leader ID and cluster name from labels or annotations
-    getLeaderIdFromLabelsOrAnnotations(pod) {
+    // Helper methods to extract controller ID and cluster name from labels or annotations
+    getControllerFromLabelsOrAnnotations(pod) {
         if (!pod) return null;
 
         // Check annotations first

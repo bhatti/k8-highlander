@@ -44,6 +44,7 @@ import (
 	"context"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 	"strings"
 	"time"
 
@@ -136,7 +137,12 @@ func ContainersSummary(containers []corev1.Container) string {
 	return buf.String()
 }
 
-func (c *BaseWorkloadConfig) BuildContainers(leaderInfo LocalLeaderInfo) (labels map[string]string, containers []corev1.Container) {
+func (c *BaseWorkloadConfig) BuildContainers(leaderInfo LocalLeaderInfo) (labels map[string]string, containers []corev1.Container, err error) {
+	if !leaderInfo.IsLeader {
+		klog.Errorf("should not be able to build containers if not leader %v", leaderInfo)
+		return labels, containers, fmt.Errorf("should not be able to build containers if not leader %v", leaderInfo)
+	}
+
 	// Set up environment variables
 	var envVars []corev1.EnvVar
 	for name, value := range c.Env {
@@ -179,7 +185,7 @@ func (c *BaseWorkloadConfig) BuildContainers(leaderInfo LocalLeaderInfo) (labels
 		Resources:       c.Resources.BuildResourceRequirements(),
 		ImagePullPolicy: corev1.PullIfNotPresent,
 	}
-	//klog.Infof("Main %s resource requirements: %+v (input %v)", c.Name, mainContainer.Resources, c.Resources)
+	klog.V(4).Infof("Main %s resource requirements: %+v (input %v)", c.Name, mainContainer.Resources, c.Resources)
 
 	// Set up container ports
 	var containerPorts []corev1.ContainerPort
@@ -192,7 +198,7 @@ func (c *BaseWorkloadConfig) BuildContainers(leaderInfo LocalLeaderInfo) (labels
 	mainContainer.Ports = containerPorts
 
 	containers = append(containers, mainContainer)
-	return labels, append(containers, c.BuildSidecars()...)
+	return labels, append(containers, c.BuildSidecars()...), nil
 }
 
 func (c *BaseWorkloadConfig) BuildSidecars() (sidecars []corev1.Container) {
@@ -216,7 +222,7 @@ func (c *BaseWorkloadConfig) BuildSidecars() (sidecars []corev1.Container) {
 			Resources:       sidecar.Resources.BuildResourceRequirements(),
 			ImagePullPolicy: corev1.PullIfNotPresent,
 		}
-		//klog.Infof("Sidecar %s resource requirements: %+v (input %v)", c.Name, sidecarContainer.Resources, sidecar.Resources)
+		klog.V(4).Infof("Sidecar %s resource requirements: %+v (input %v)", c.Name, sidecarContainer.Resources, sidecar.Resources)
 
 		// Add volume mounts
 		for _, volumeMount := range sidecar.VolumeMounts {
