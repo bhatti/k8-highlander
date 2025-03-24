@@ -220,9 +220,10 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 			if pod.DeletionTimestamp != nil {
 				terminatingTime := time.Since(pod.DeletionTimestamp.Time)
 				if terminatingTime > 10*time.Second {
-					klog.Warningf("Pod %s stuck in Terminating state for %v, force deleting [elapsed: %s]",
-						p.podName, terminatingTime, time.Since(startTime))
-					common.ForceDeletePod(ctx, p.client, p.config.Namespace, pod.Name)
+					if err = common.ForceDeletePod(ctx, p.client, p.config.Namespace, pod.Name); err != nil {
+						klog.Errorf("Pod %s stuck in Terminating state for %v, force deleting failed: %s [elapsed: %s]",
+							pod.Name, terminatingTime, err, time.Since(startTime))
+					}
 				}
 			}
 
@@ -267,6 +268,7 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 	// Update status
 	p.updateStatus(func(s *common.WorkloadStatus) {
 		s.Active = false
+		s.Healthy = false
 		s.Details["stoppedAt"] = time.Now()
 	})
 

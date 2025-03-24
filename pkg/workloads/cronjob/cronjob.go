@@ -269,10 +269,10 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 						if pod.DeletionTimestamp != nil {
 							terminatingTime := time.Since(pod.DeletionTimestamp.Time)
 							if terminatingTime > c.config.TerminationGracePeriod/2-time.Second {
-								klog.Warningf("Pod %s stuck in Terminating state for %v, force deleting [elapsed: %s]",
-									pod.Name, terminatingTime, time.Since(startTime))
-
-								common.ForceDeletePod(ctx, c.client, c.config.Namespace, pod.Name)
+								if err = common.ForceDeletePod(ctx, c.client, c.config.Namespace, pod.Name); err != nil {
+									klog.Errorf("Pod %s stuck in Terminating state for %v, force deleting failed: %s [elapsed: %s]",
+										pod.Name, terminatingTime, err, time.Since(startTime))
+								}
 							}
 						} else {
 							// Pod exists but doesn't have a deletion timestamp, try to delete it

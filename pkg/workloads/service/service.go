@@ -224,9 +224,10 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 			if pod.DeletionTimestamp != nil {
 				terminatingTime := time.Since(pod.DeletionTimestamp.Time)
 				if terminatingTime > 10*time.Second {
-					klog.Warningf("Pod %s stuck in Terminating state for %v, force deleting [elapsed: %s]",
-						pod.Name, terminatingTime, time.Since(startTime))
-					common.ForceDeletePod(ctx, d.client, d.config.Namespace, pod.Name)
+					if err = common.ForceDeletePod(ctx, d.client, d.config.Namespace, pod.Name); err != nil {
+						klog.Errorf("Pod %s stuck in Terminating state for %v, force deleting failed: %s [elapsed: %s]",
+							pod.Name, terminatingTime, err, time.Since(startTime))
+					}
 				}
 			} else {
 				// Pod exists but doesn't have a deletion timestamp, try to delete it
@@ -348,6 +349,7 @@ func (d *ServiceWorkload) scaleDeployment(ctx context.Context, replicas int32) e
 			s.Details["replicas"] = replicas
 			if replicas == 0 {
 				s.Active = false
+				s.Healthy = false
 			}
 		})
 

@@ -63,6 +63,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -887,8 +888,20 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 			// Check workload health
 			statuses := lc.workloadManager.GetAllStatuses()
 			for name, status := range statuses {
-				if !status.Healthy {
+				// Only attempt recovery for active workloads that are unhealthy
+				if status.Active && !status.Healthy {
 					klog.Warningf("Workload %s is unhealthy: %s", name, status.LastError)
+
+					// Don't restart pods that are just in Pending state
+					if strings.Contains(status.LastError, "Pod in Pending state") {
+						klog.V(4).Infof("Workload %s is in Pending state, not restarting", name)
+						continue
+					}
+					// Don't restart workload that were just started
+					if status.LastTransition.Add(2 * time.Minute).After(time.Now()) {
+						klog.V(4).Infof("Workload %s was recently started, not restarting yet", name)
+						continue
+					}
 
 					// Try to recover the workload
 					workload, exists := lc.workloadManager.GetWorkload(name)
