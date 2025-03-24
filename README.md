@@ -432,6 +432,4 @@ run stateful workloads in Kubernetes with confidence, knowing that exactly one i
 
 ---
 
-<p align="center">
-  Sponsored by [PlexObject Solutions, Inc.](https://plexobject.com) and made with ❤️ for the Kubernetes community.
-</p>
+Sponsored by [PlexObject Solutions, Inc.](https://plexobject.com) and made with ❤️ for the Kubernetes community.
