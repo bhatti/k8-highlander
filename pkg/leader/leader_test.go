@@ -59,6 +59,13 @@ const (
 	DBStorage    StorageType = "db"
 )
 
+var dbFailure = common.DBFailureConfig{
+	FailureThreshold:            200 * time.Millisecond,
+	MaxConsecutiveFailures:      3,
+	RecoveryStabilizationPeriod: 200 * time.Millisecond,
+	HealthCheckInterval:         200 * time.Millisecond,
+}
+
 // TestEnv encapsulates the test environment
 type TestEnv struct {
 	t               *testing.T
@@ -695,13 +702,14 @@ func (e *TestEnv) CreateController(id string, tenant string) *LeaderController {
 
 	// Create the controller
 	controller := NewLeaderController(
-		e.leaderStorage,
 		id,
+		tenant,
+		&dbFailure,
 		&e.cluster,
+		e.leaderStorage,
 		e.metrics,
 		e.monitorServer,
 		workloadMgr,
-		tenant,
 	)
 
 	e.controllers[id] = controller
@@ -1476,23 +1484,25 @@ func TestLeaderFailoverWithWorkloads(t *testing.T) {
 
 	// Create controllers
 	controller1 := NewLeaderController(
-		env.leaderStorage,
 		"failover-controller-1",
+		"failover-test",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr1,
-		"failover-test",
 	)
 
 	controller2 := NewLeaderController(
-		env.leaderStorage,
 		"failover-controller-2",
+		"failover-test",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr2,
-		"failover-test",
 	)
 
 	// Start both controllers
@@ -1852,13 +1862,14 @@ func TestRealWorkloads(t *testing.T) {
 
 	// Create a controller with our workload manager
 	controller := NewLeaderController(
-		env.leaderStorage,
 		"real-workload-controller",
+		"tenant",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr,
-		"tenant",
 	)
 
 	// Start the controller
@@ -2034,13 +2045,14 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 
 	// Create a controller with our workload manager
 	controller := NewLeaderController(
-		env.leaderStorage,
 		"controller-with-workloads",
+		"tenant",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr,
-		"tenant",
 	)
 
 	// Start the controller
@@ -2374,13 +2386,14 @@ func TestProcessManagerWithMultipleProcesses(t *testing.T) {
 
 	// Create a controller with our workload manager
 	controller := NewLeaderController(
-		env.leaderStorage,
 		"controller-with-process-manager",
+		"tenant",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr,
-		"tenant",
 	)
 
 	// After starting the controller
@@ -2501,23 +2514,25 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 
 	// Create controllers
 	controller1 := NewLeaderController(
-		env.leaderStorage,
 		"failover-controller-1",
+		"failover-test",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr1,
-		"failover-test",
 	)
 
 	controller2 := NewLeaderController(
-		env.leaderStorage,
 		"failover-controller-2",
+		"failover-test",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr2,
-		"failover-test",
 	)
 
 	// Start both controllers
@@ -2685,13 +2700,14 @@ func TestRealWorldScenario(t *testing.T) {
 
 	// Create a controller with our workload manager
 	controller := NewLeaderController(
-		env.leaderStorage,
 		"real-world-controller",
+		"production",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr,
-		"production",
 	)
 
 	// Start the controller
@@ -2798,13 +2814,14 @@ func TestDockerCommandExecution(t *testing.T) {
 
 	// Create a controller with our workload manager
 	controller := NewLeaderController(
-		env.leaderStorage,
 		"docker-test-controller",
+		"docker-test",
+		&dbFailure,
 		&env.cluster,
+		env.leaderStorage,
 		env.metrics,
 		env.monitorServer,
 		workloadMgr,
-		"docker-test",
 	)
 
 	// Start the controller
@@ -2886,13 +2903,14 @@ func TestStorageImplementationComparison(t *testing.T) {
 
 		// Create a controller with Redis storage
 		controller := NewLeaderController(
-			env.leaderStorage,
 			"redis-storage-controller",
+			"storage-test",
+			&dbFailure,
 			&env.cluster,
+			env.leaderStorage,
 			env.metrics,
 			env.monitorServer,
 			workloadMgr,
-			"storage-test",
 		)
 
 		// Start the controller
@@ -2959,13 +2977,14 @@ func TestStorageImplementationComparison(t *testing.T) {
 
 		// Create a controller with DB storage
 		controller := NewLeaderController(
-			env.leaderStorage,
 			"db-storage-controller",
+			"storage-test",
+			&dbFailure,
 			&env.cluster,
+			env.leaderStorage,
 			env.metrics,
 			env.monitorServer,
 			workloadMgr,
-			"storage-test",
 		)
 
 		// Start the controller

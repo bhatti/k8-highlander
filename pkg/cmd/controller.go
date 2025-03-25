@@ -124,13 +124,14 @@ func runController() error {
 	}
 
 	leaderController := leader.NewLeaderController(
-		leaderStorage,
 		appConfig.ID,
+		appConfig.Tenant,
+		&appConfig.DBFailure,
 		cluster,
+		leaderStorage,
 		metrics,
 		monitoringServer,
 		workloadManager,
-		appConfig.Tenant,
 	)
 
 	// Handle graceful shutdown

@@ -58,6 +58,21 @@ func (e ValidationError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Field, e.Message)
 }
 
+func (cfg *DBFailureConfig) Validate() {
+	if cfg.MaxConsecutiveFailures < 1 {
+		cfg.MaxConsecutiveFailures = 5
+	}
+	if cfg.FailureThreshold.Seconds() < 0 {
+		cfg.FailureThreshold = 2 * time.Minute
+	}
+	if cfg.HealthCheckInterval.Seconds() < 0 {
+		cfg.HealthCheckInterval = 15 * time.Second
+	}
+	if cfg.RecoveryStabilizationPeriod.Seconds() < 0 {
+		cfg.RecoveryStabilizationPeriod = 15 * time.Second
+	}
+}
+
 // Validate validates a process configuration
 func (cfg *ProcessConfig) Validate(defNS string) []ValidationError {
 	if cfg.TerminationGracePeriod.Seconds() <= 0 {

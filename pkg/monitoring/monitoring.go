@@ -106,6 +106,15 @@ type ControllerMetrics struct {
 
 	WorkloadRetryAttempts *prometheus.CounterVec
 	WorkloadRetrySuccess  *prometheus.CounterVec
+
+	DBConnectionFailed     prometheus.Counter
+	DBConsecutiveFailures  prometheus.Gauge
+	DBFailureDuration      prometheus.Gauge
+	DBLastSuccessTimestamp prometheus.Gauge
+	DBReconnectionAttempts prometheus.Counter
+	DBReconnectionSuccess  prometheus.Counter
+	ControllerStateStatus  *prometheus.GaugeVec
+	SplitBrainProtection   prometheus.Gauge
 }
 
 // HealthStatus represents the health status of the controller
@@ -131,6 +140,14 @@ type HealthStatus struct {
 	CurrentLeader              string `json:"currentLeader"`
 	LastLeader                 string `json:"lastLeader"`
 	LastLeadershipChangeReason string `json:"lastLeadershipChangeReason"`
+
+	ControllerState      string        `json:"controllerState"`
+	DBFailureCount       int           `json:"dbFailureCount"`
+	DBFailureDuration    time.Duration `json:"dbFailureDuration,omitempty"`
+	DBLastSuccessTime    time.Time     `json:"dbLastSuccessTime"`
+	DBLastFailureTime    time.Time     `json:"dbLastFailureTime,omitempty"`
+	DBFailureThreshold   time.Duration `json:"dbFailureThreshold"`
+	SplitBrainProtection bool          `json:"splitBrainProtection"`
 }
 
 // MonitoringServer provides monitoring and health endpoints
@@ -294,6 +311,38 @@ func NewControllerMetrics(reg prometheus.Registerer) *ControllerMetrics {
 			Name: "k8_highlander_workload_retry_success_total",
 			Help: "Total number of successful retry attempts for workloads",
 		}, []string{"type", "name"}),
+		DBConnectionFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8_highlander_db_connection_failed_total",
+			Help: "Total number of DB connection failures",
+		}),
+		DBConsecutiveFailures: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8_highlander_db_consecutive_failures",
+			Help: "Current number of consecutive DB failures",
+		}),
+		DBFailureDuration: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8_highlander_db_failure_duration_seconds",
+			Help: "Duration of the current DB failure in seconds",
+		}),
+		DBLastSuccessTimestamp: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8_highlander_db_last_success_timestamp_seconds",
+			Help: "Timestamp of the last successful DB operation",
+		}),
+		DBReconnectionAttempts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8_highlander_db_reconnection_attempts_total",
+			Help: "Total number of DB reconnection attempts",
+		}),
+		DBReconnectionSuccess: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "k8_highlander_db_reconnection_success_total",
+			Help: "Total number of successful DB reconnections",
+		}),
+		ControllerStateStatus: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "k8_highlander_controller_state_status",
+			Help: "Status of the controller state (1=active, 0=inactive)",
+		}, []string{"state"}),
+		SplitBrainProtection: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "k8_highlander_split_brain_protection_active",
+			Help: "Indicates if split-brain protection has been activated (1) or not (0)",
+		}),
 	}
 
 	// Register all metrics with Prometheus
@@ -329,6 +378,14 @@ func NewControllerMetrics(reg prometheus.Registerer) *ControllerMetrics {
 		metrics.PersistentStatus,
 		metrics.WorkloadRetryAttempts,
 		metrics.WorkloadRetrySuccess,
+		metrics.DBConnectionFailed,
+		metrics.DBConsecutiveFailures,
+		metrics.DBFailureDuration,
+		metrics.DBLastSuccessTimestamp,
+		metrics.DBReconnectionAttempts,
+		metrics.DBReconnectionSuccess,
+		metrics.ControllerStateStatus,
+		metrics.SplitBrainProtection,
 	)
 
 	return metrics
@@ -769,5 +826,61 @@ func (m *MonitoringServer) UpdateWorkloadRetryStatus(workloadType, name string, 
 		"retryCount": retryCount,
 		"lastError":  lastError,
 		"nextRetry":  time.Now().Add(nextRetry).Format(time.RFC3339),
+	}
+}
+
+func (m *MonitoringServer) SetControllerState(state string) {
+	m.statusMutex.Lock()
+	defer m.statusMutex.Unlock()
+
+	// Assuming we've enhanced the HealthStatus struct with a ControllerState field
+	m.healthStatus.ControllerState = state
+}
+
+func (m *MonitoringServer) UpdateDBFailureMetrics(failureCount int, failureDuration time.Duration, threshold time.Duration, lastFailureTime, lastSuccessTime time.Time) {
+	m.statusMutex.Lock()
+	defer m.statusMutex.Unlock()
+
+	// Assuming we've enhanced the HealthStatus struct with these fields
+	m.healthStatus.DBFailureCount = failureCount
+	m.healthStatus.DBFailureDuration = failureDuration
+	m.healthStatus.DBFailureThreshold = threshold
+	m.healthStatus.DBLastFailureTime = lastFailureTime
+	m.healthStatus.DBLastSuccessTime = lastSuccessTime
+
+	// If this controller has engaged split-brain protection (given up leadership due to DB issues)
+	if failureDuration >= threshold {
+		m.healthStatus.SplitBrainProtection = true
+	}
+}
+
+// UpdateDBFailureMetrics updates the DB failure metrics
+func (m *ControllerMetrics) UpdateDBFailureMetrics(
+	failureCount int,
+	failureDuration time.Duration,
+	lastSuccessTime time.Time,
+	state string,
+	splitBrainProtectionActive bool) {
+
+	m.DBConsecutiveFailures.Set(float64(failureCount))
+	m.DBFailureDuration.Set(failureDuration.Seconds())
+	m.DBLastSuccessTimestamp.Set(float64(lastSuccessTime.Unix()))
+
+	// Update controller state gauge
+	m.ControllerStateStatus.Reset()
+	states := []string{"NORMAL", "DEGRADED_DB", "SPLIT_BRAIN_RISK"}
+	for _, s := range states {
+		if s == state {
+			m.ControllerStateStatus.WithLabelValues(s).Set(1)
+		} else {
+			m.ControllerStateStatus.WithLabelValues(s).Set(0)
+		}
+	}
+
+	// Update split-brain protection gauge
+	if splitBrainProtectionActive {
+		m.SplitBrainProtection.Set(1)
+	} else {
+		m.SplitBrainProtection.Set(0)
 	}
 }

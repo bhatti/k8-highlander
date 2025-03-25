@@ -68,14 +68,32 @@ import (
 
 // ClusterConfig holds configuration for a Kubernetes cluster
 type ClusterConfig struct {
-	Name         string
-	Kubeconfig   string
+	Name         string `json:"name" yaml:"name"`
+	Kubeconfig   string `json:"kubeconfig" yaml:"kubeconfig"`
 	clientHolder *ClientHolder
 }
 
 type ClientHolder struct {
 	clientMutex sync.RWMutex
 	client      kubernetes.Interface
+}
+
+// DBFailureConfig defines configuration for database failure handling
+type DBFailureConfig struct {
+	// Time threshold after which to transition to split-brain risk state
+	FailureThreshold time.Duration `json:"failureThreshold" yaml:"failureThreshold"`
+
+	// Maximum number of consecutive failures before taking action
+	MaxConsecutiveFailures int `json:"maxConsecutiveFailures" yaml:"maxConsecutiveFailures"`
+
+	// Whether to stop workloads in split-brain risk state
+	EnableSplitBrainProtection bool `json:"enableSplitBrainProtection" yaml:"enableSplitBrainProtection"`
+
+	// How often to check database health
+	HealthCheckInterval time.Duration `json:"healthCheckInterval" yaml:"healthCheckInterval"`
+
+	// Minimum time with restored DB connectivity before transitioning back to normal state
+	RecoveryStabilizationPeriod time.Duration `json:"recoveryStabilizationPeriod" yaml:"recoveryStabilizationPeriod"`
 }
 
 func (c *ClusterConfig) GetClient() kubernetes.Interface {
@@ -170,6 +188,9 @@ type AppConfig struct {
 
 	// Clusters configuration
 	Cluster ClusterConfig `yaml:"cluster"`
+
+	// Clusters configuration
+	DBFailure DBFailureConfig `yaml:"dbFailure"`
 
 	// Workloads configuration
 	Workloads struct {

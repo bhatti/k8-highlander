@@ -126,6 +126,12 @@ class StatefulDashboard {
             if (!existingBanner) {
                 leaderContainer.appendChild(errorBanner);
             }
+            // Also update controller state indicator if present
+            const controllerStateElem = leaderContainer.querySelector('[data-controller-state]');
+            if (controllerStateElem) {
+                controllerStateElem.className = 'text-danger';
+                controllerStateElem.textContent = 'UNKNOWN (Connection Error)';
+            }
         }
 
         // Update cluster status to show connection error
@@ -260,34 +266,66 @@ class StatefulDashboard {
             leaderSince = new Date(status.leaderSince).toLocaleString();
         }
 
+        // Get controller state (new)
+        const controllerState = status.controllerState || 'NORMAL';
+        let stateClass = 'text-success';
+        let stateAlert = '';
+
+        // Add visual indicators based on controller state (new)
+        if (controllerState === 'DEGRADED_DB') {
+            stateClass = 'text-warning';
+            stateAlert = `
+            <div class="alert alert-warning mt-2">
+                <strong>Warning:</strong> Database connectivity is degraded.
+                <p>The controller is experiencing database connectivity issues.</p>
+            </div>
+        `;
+        } else if (controllerState === 'SPLIT_BRAIN_RISK') {
+            stateClass = 'text-danger';
+            stateAlert = `
+            <div class="alert alert-danger mt-2">
+                <strong>Alert:</strong> Split-brain risk detected!
+                <p>The controller has lost database connectivity and may be in a split-brain condition.</p>
+                ${status.splitBrainProtection ?
+                '<p>Split-brain protection is active. Workloads have been stopped for safety.</p>' :
+                '<p>Split-brain protection is disabled. This is potentially dangerous.</p>'}
+                <p>Manual intervention may be required.</p>
+            </div>
+        `;
+        }
+
         container.innerHTML = `
-    <div class="d-flex align-items-center mb-3">
-    <div class="me-3">
-    <i class="fas ${isLeader ? 'fa-crown' : 'fa-user'} fa-2x"></i>
-</div>
-<div>
-    <h4 class="mb-0">${statusText}</h4>
-    <p class="text-muted mb-0">Instance ID: ${status.leaderID || 'Unknown'}</p>
-</div>
-</div>
-<div class="mb-2">
-    <strong>Current Leader:</strong> ${status.currentLeader || 'None'}
-</div>
-<div class="mb-2">
-    <strong>Last Leader:</strong> ${status.lastLeader || 'None'}
-</div>
-<div class="mb-2">
-    <strong>Leader Since:</strong> ${leaderSince}
-</div>
-<div class="mb-2">
-    <strong>Leadership Transitions:</strong> ${status.leadershipTransitions || 0}
-</div>
-<div class="mb-2">
-    <strong>Failover Count:</strong> ${status.failoverCount || 0}
-</div>
-<div>
-    <strong>Last Transition Reason:</strong> ${status.lastLeadershipChangeReason || 'N/A'}
-</div>
+        <div class="d-flex align-items-center mb-3">
+            <div class="me-3">
+                <i class="fas ${isLeader ? 'fa-crown' : 'fa-user'} fa-2x"></i>
+            </div>
+            <div>
+                <h4 class="mb-0">${statusText}</h4>
+                <p class="text-muted mb-0">Instance ID: ${status.leaderID || 'Unknown'}</p>
+            </div>
+        </div>
+        <div class="mb-2">
+            <strong>Current Leader:</strong> ${status.currentLeader || 'None'}
+        </div>
+        <div class="mb-2">
+            <strong>Last Leader:</strong> ${status.lastLeader || 'None'}
+        </div>
+        <div class="mb-2">
+            <strong>Leader Since:</strong> ${leaderSince}
+        </div>
+        <div class="mb-2">
+            <strong>Leadership Transitions:</strong> ${status.leadershipTransitions || 0}
+        </div>
+        <div class="mb-2">
+            <strong>Failover Count:</strong> ${status.failoverCount || 0}
+        </div>
+        <div class="mb-2">
+            <strong>Controller State:</strong> <span class="${stateClass}">${controllerState}</span>
+        </div>
+        <div>
+            <strong>Last Transition Reason:</strong> ${status.lastLeadershipChangeReason || 'N/A'}
+        </div>
+        ${stateAlert}
     `;
     }
 
@@ -372,36 +410,81 @@ class StatefulDashboard {
         // Get address
         const address = dbInfo.address || 'Unknown';
 
+        // Get DB failure info (new)
+        const dbFailureCount = status.dbFailureCount || 0;
+        const dbFailureDuration = status.dbFailureDuration ? this.formatDuration(status.dbFailureDuration) : 'N/A';
+        const dbFailureThreshold = status.dbFailureThreshold ? this.formatDuration(status.dbFailureThreshold) : 'N/A';
+
+        // Determine DB health status class (new)
+        let dbHealthClass = 'text-success';
+        let dbHealthAlert = '';
+
+        if (dbFailureCount > 0) {
+            dbHealthClass = 'text-warning';
+
+            if (status.controllerState === 'SPLIT_BRAIN_RISK') {
+                dbHealthClass = 'text-danger';
+                dbHealthAlert = `
+                <div class="alert alert-danger mt-2">
+                    <strong>Critical:</strong> Prolonged database connection failure
+                    <p>Duration: ${dbFailureDuration}</p>
+                    <p>Threshold: ${dbFailureThreshold}</p>
+                </div>
+            `;
+            } else if (status.controllerState === 'DEGRADED_DB') {
+                dbHealthAlert = `
+                <div class="alert alert-warning mt-2">
+                    <strong>Warning:</strong> Database connectivity is degraded
+                    <p>Consecutive failures: ${dbFailureCount}</p>
+                </div>
+            `;
+            }
+        }
+
         // Build HTML
         let html = `
-<div class="mb-2">
-    <strong>${storageTypeDisplay} Connected:</strong>
-    <span class="status-indicator ${isConnected ? 'status-active' : 'status-inactive'}"></span>
-    ${isConnected ? 'Connected' : 'Disconnected'}
-</div>
-<div class="mb-2">
-    <strong>Address:</strong> ${address}
-</div>`;
+        <div class="mb-2">
+            <strong>${storageTypeDisplay} Connected:</strong>
+            <span class="status-indicator ${isConnected ? 'status-active' : 'status-inactive'}"></span>
+            ${isConnected ? 'Connected' : 'Disconnected'}
+        </div>
+        <div class="mb-2">
+            <strong>Address:</strong> ${address}
+        </div>
+        <div class="mb-2">
+            <strong>DB Failure Count:</strong> <span class="${dbHealthClass}">${dbFailureCount}</span>
+        </div>`;
+
+        if (dbFailureCount > 0) {
+            html += `
+        <div class="mb-2">
+            <strong>Failure Duration:</strong> ${dbFailureDuration}
+        </div>
+        <div class="mb-2">
+            <strong>Failure Threshold:</strong> ${dbFailureThreshold}
+        </div>`;
+        }
 
         // Add any additional details
         if (dbInfo.details && Object.keys(dbInfo.details).length > 0) {
             for (const [key, value] of Object.entries(dbInfo.details)) {
                 if (key !== 'type') { // Skip type as we already displayed it
                     html += `
-<div class="mb-2">
-    <strong>${key.charAt(0).toUpperCase() + key.slice(1)}:</strong> ${value || 'N/A'}
-</div>`;
+                <div class="mb-2">
+                    <strong>${key.charAt(0).toUpperCase() + key.slice(1)}:</strong> ${value || 'N/A'}
+                </div>`;
                 }
             }
         }
 
         html += `
-<div class="mb-2">
-    <strong>Last Error:</strong> ${status.lastError || 'None'}
-</div>
-<div>
-    <a href="/metrics" target="_blank" class="btn btn-sm btn-primary">View Metrics</a>
-</div>`;
+        <div class="mb-2">
+            <strong>Last Error:</strong> ${status.lastError || 'None'}
+        </div>
+        <div>
+            <a href="/metrics" target="_blank" class="btn btn-sm btn-primary">View Metrics</a>
+        </div>
+        ${dbHealthAlert}`;
 
         container.innerHTML = html;
     }
@@ -953,29 +1036,39 @@ class StatefulDashboard {
 
     // Utility methods
     formatDuration(durationStr) {
-        if (!durationStr) return 'N/A';
+        // If duration is provided as nanoseconds in a numeric format
+        if (typeof durationStr === 'number') {
+            // Assume nanoseconds and convert to milliseconds
+            const ms = durationStr / 1000000;
+            const seconds = Math.floor(ms / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
 
-        // Convert to string if it's not already a string
-        if (typeof durationStr !== 'string') {
-            return String(durationStr);
+            if (hours > 0) {
+                return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds % 60}s`;
+            } else {
+                return `${seconds}s`;
+            }
         }
 
-        // Now we know it's a string, so we can safely use match
-        const regex = /(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/;
-        const matches = durationStr.match(regex);
+        // Handle string duration format (e.g. "5m0s")
+        if (typeof durationStr === 'string') {
+            // Try to parse Go-style duration strings
+            const hours = durationStr.match(/(\d+)h/);
+            const minutes = durationStr.match(/(\d+)m/);
+            const seconds = durationStr.match(/(\d+)s/);
 
-        if (!matches) return durationStr;
+            let result = '';
+            if (hours) result += `${hours[1]}h `;
+            if (minutes) result += `${minutes[1]}m `;
+            if (seconds) result += `${seconds[1]}s`;
 
-        const hours = parseInt(matches[1] || 0);
-        const minutes = parseInt(matches[2] || 0);
-        const seconds = parseInt(matches[3] || 0);
+            return result.trim() || durationStr;
+        }
 
-        let result = '';
-        if (hours > 0) result += `${hours}h `;
-        if (minutes > 0) result += `${minutes}m `;
-        if (seconds > 0 || result === '') result += `${seconds}s`;
-
-        return result.trim();
+        return 'N/A';
     }
 
     showLoading(show) {

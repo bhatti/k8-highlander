@@ -83,6 +83,21 @@ const (
 	workloadCheckInterval      = 5 * time.Second
 )
 
+// ControllerState represents the state of the leader controller
+type ControllerState string
+
+const (
+	// StateNormal indicates normal operation with database connectivity
+	StateNormal ControllerState = "NORMAL"
+
+	// StateDegradedDB indicates database connectivity issues but still functional
+	StateDegradedDB ControllerState = "DEGRADED_DB"
+
+	// StateSplitBrainRisk indicates prolonged database connectivity issues
+	// with a risk of split-brain scenarios
+	StateSplitBrainRisk ControllerState = "SPLIT_BRAIN_RISK"
+)
+
 // LeaderController manages the leader election process and workload lifecycle.
 // It handles lock acquisition, renewal, monitoring, and graceful transitions
 // between leaders.
@@ -112,17 +127,30 @@ type LeaderController struct {
 
 	// Flag to indicate if this is a self restart
 	isSelfRestart bool
+
+	// database failure handling
+	dbFailureThreshold          time.Duration   // Time before entering split-brain risk state
+	dbFailureCount              int             // Counter for consecutive DB failures
+	maxConsecutiveFailures      int             // Max failures before taking action
+	lastDBSuccessTime           time.Time       // Last time DB was successfully accessed
+	lastDBFailureTime           time.Time       // Time of first DB failure in current sequence
+	controllerState             ControllerState // Current state of the controller
+	dbFailureMutex              sync.RWMutex    // Mutex for DB failure tracking
+	enableSplitBrainProtection  bool            // Whether to stop workloads in split-brain risk state
+	healthCheckInterval         time.Duration   // How often to check database health
+	recoveryStabilizationPeriod time.Duration   // How long to wait before returning to normal state
 }
 
 // NewLeaderController creates a new leader controller
 func NewLeaderController(
-	storage storage.LeaderStorage,
 	id string,
+	tenant string,
+	cfg *common.DBFailureConfig,
 	activeCluster *common.ClusterConfig,
+	storage storage.LeaderStorage,
 	metrics *monitoring.ControllerMetrics,
 	monitoringServer *monitoring.MonitoringServer,
 	workloadManager workloads.Manager,
-	tenant string,
 ) *LeaderController {
 	// Use default tenant if empty
 	if tenant == "" {
@@ -130,14 +158,21 @@ func NewLeaderController(
 	}
 
 	return &LeaderController{
-		storage:          storage,
-		id:               id,
-		cluster:          activeCluster,
-		metrics:          metrics,
-		monitoringServer: monitoringServer,
-		workloadManager:  workloadManager,
-		leaderLockKey:    fmt.Sprintf(leaderLockKeyFormat, tenant),
-		stopCh:           make(chan struct{}),
+		storage:                     storage,
+		id:                          id,
+		cluster:                     activeCluster,
+		metrics:                     metrics,
+		monitoringServer:            monitoringServer,
+		workloadManager:             workloadManager,
+		leaderLockKey:               fmt.Sprintf(leaderLockKeyFormat, tenant),
+		stopCh:                      make(chan struct{}),
+		dbFailureThreshold:          cfg.FailureThreshold,
+		maxConsecutiveFailures:      cfg.MaxConsecutiveFailures,
+		enableSplitBrainProtection:  cfg.EnableSplitBrainProtection,
+		healthCheckInterval:         cfg.HealthCheckInterval,
+		recoveryStabilizationPeriod: cfg.RecoveryStabilizationPeriod,
+		lastDBSuccessTime:           time.Now(),
+		controllerState:             StateNormal,
 	}
 }
 
@@ -258,7 +293,19 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	currentLeader, err := lc.getCurrentLeader(ctx)
 	if err != nil {
 		klog.Errorf("Error getting current leader: %v", err)
-		// Continue anyway, but log the error
+		lc.recordDBError(err)
+
+		// If we've been in a degraded state for too long, don't try to acquire leadership
+		if lc.controllerState == StateSplitBrainRisk {
+			klog.Warningf("Not attempting to acquire leadership in SPLIT_BRAIN_RISK state")
+			lc.metrics.LeadershipFailedAttempts.Inc()
+			return false
+		}
+
+		// Continue with acquisition attempt if degraded but not critical
+	} else {
+		// Record successful DB operation
+		lc.recordDBSuccess()
 	}
 
 	// IMPORTANT: Always store the current leader as previous leader if it exists
@@ -298,10 +345,13 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	lc.metrics.RecordDBOperation("setNX", duration, err)
 
 	if err != nil {
+		lc.recordDBError(err)
 		klog.Errorf("Error trying to acquire leadership: %v", err)
 		lc.metrics.LeadershipFailedAttempts.Inc()
-		lc.monitoringServer.SetError(fmt.Errorf("failed to acquire leadership: %w", err))
 		return false
+	} else {
+		// Record successful DB operation
+		lc.recordDBSuccess()
 	}
 
 	// Only update status if we successfully acquired the lock
@@ -322,6 +372,7 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 		lc.monitoringServer.UpdateLeaderStatus(true, lc.id, lc.cluster.Name)
 		lc.monitoringServer.UpdateCurrentLeader(lc.id)
 		lc.monitoringServer.ClearError()
+		lc.monitoringServer.SetControllerState(string(StateNormal))
 
 		// Update metrics
 		lc.metrics.IsLeader.Set(1)
@@ -333,6 +384,7 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 		verifyLeader, verifyErr := lc.getCurrentLeader(ctx)
 		if verifyErr != nil {
 			klog.Errorf("Error verifying leadership acquisition: %v", verifyErr)
+			lc.recordDBError(verifyErr)
 		} else if verifyLeader != lc.id {
 			klog.Warningf("Leadership verification failed! Expected %s, got %s", lc.id, verifyLeader)
 		} else {
@@ -371,8 +423,26 @@ func (lc *LeaderController) RenewLeadership(ctx context.Context) bool {
 
 	if err != nil {
 		klog.Errorf("Error checking leadership: %v", err)
-		lc.monitoringServer.SetError(fmt.Errorf("error checking leadership: %w", err))
+		lc.recordDBError(err)
+
+		// If we're in a serious DB failure state, give up leadership for safety
+		if lc.controllerState == StateSplitBrainRisk {
+			klog.Errorf("Giving up leadership due to database failure in SPLIT_BRAIN_RISK state")
+			return false
+		}
+
+		// For intermittent failures in degraded state, continue as leader
+		// but increase failure count and add jitter to renewal timing
+		if lc.dbFailureCount < lc.maxConsecutiveFailures {
+			klog.Warningf("Continuing as leader despite %d DB failures", lc.dbFailureCount)
+			return true
+		}
+
+		// For too many consecutive failures, give up leadership
 		return false
+	} else {
+		// Record successful DB operation
+		lc.recordDBSuccess()
 	}
 
 	if val == "" {
@@ -405,16 +475,32 @@ func (lc *LeaderController) RenewLeadership(ctx context.Context) bool {
 
 	if err != nil {
 		klog.Errorf("Error renewing leadership: %v", err)
-		lc.monitoringServer.SetError(fmt.Errorf("error renewing leadership: %w", err))
+		lc.recordDBError(err)
+
+		// Similar logic as above - if critical, immediately give up leadership
+		if lc.controllerState == StateSplitBrainRisk {
+			return false
+		}
+
+		// For degraded but not critical, continue with caution
+		if lc.dbFailureCount < lc.maxConsecutiveFailures {
+			return true
+		}
+
 		return false
+	} else {
+		// Record successful DB operation
+		lc.recordDBSuccess()
 	}
 
 	// Get TTL for metrics
-	ttl, _ := lc.storage.GetLockTTL(ctx, lc.leaderLockKey)
-
-	// Update TTL metric
-	lc.metrics.DBLockTTL.Set(ttl.Seconds())
-
+	ttl, ttlErr := lc.storage.GetLockTTL(ctx, lc.leaderLockKey)
+	if ttlErr == nil {
+		// Update TTL metric
+		lc.metrics.DBLockTTL.Set(ttl.Seconds())
+	} else {
+		lc.recordDBError(ttlErr)
+	}
 	return success
 }
 
@@ -1112,4 +1198,238 @@ func (lc *LeaderController) canReuseExistingWorkloads(ctx context.Context) bool 
 
 	// If we get here, all workloads are running and can be reused
 	return true
+}
+
+// monitorDBHealth monitors database health and transitions to appropriate states
+// This should be started as a goroutine
+func (lc *LeaderController) monitorDBHealth(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-lc.stopCh:
+			return
+		case <-ticker.C:
+			lc.checkDBHealthAndUpdateState(ctx)
+		}
+	}
+}
+
+// checkDBHealthAndUpdateState checks database health and updates controller state accordingly
+func (lc *LeaderController) checkDBHealthAndUpdateState(ctx context.Context) {
+	lc.dbFailureMutex.Lock()
+	defer lc.dbFailureMutex.Unlock()
+
+	// Check if we're in a prolonged DB failure state
+	if lc.lastDBFailureTime.After(lc.lastDBSuccessTime) {
+		failureDuration := time.Since(lc.lastDBFailureTime)
+
+		// If we've been without DB access for longer than the threshold,
+		// transition to split-brain risk state
+		if failureDuration >= lc.dbFailureThreshold {
+			if lc.controllerState != StateSplitBrainRisk {
+				klog.Warningf("Transitioning to SPLIT_BRAIN_RISK state after %v of database failures",
+					failureDuration)
+
+				// Transition to split-brain risk state
+				lc.transitionToSplitBrainRiskState(ctx)
+			}
+		} else if lc.dbFailureCount >= lc.maxConsecutiveFailures {
+			// If we've had several consecutive failures but haven't reached
+			// the time threshold, transition to degraded state
+			if lc.controllerState == StateNormal {
+				klog.Warningf("Transitioning to DEGRADED_DB state after %d consecutive database failures",
+					lc.dbFailureCount)
+
+				lc.controllerState = StateDegradedDB
+
+				// Update monitoring
+				if lc.monitoringServer != nil {
+					lc.monitoringServer.UpdateDBStatus(false, 0)
+					lc.monitoringServer.SetControllerState(string(StateDegradedDB))
+					lc.monitoringServer.SetError(fmt.Errorf("database connectivity degraded with %d consecutive failures",
+						lc.dbFailureCount))
+				}
+			}
+		}
+	}
+
+	// Attempt a database health check
+	isHealthy := lc.checkDatabaseHealth(ctx)
+
+	if isHealthy {
+		// Reset counters and update last success time
+		lc.lastDBSuccessTime = time.Now()
+		lc.dbFailureCount = 0
+
+		// If we're in a degraded or split-brain risk state, consider transitioning back
+		if lc.controllerState != StateNormal {
+			// Only transition back to normal if we've had multiple consecutive successes
+			if time.Since(lc.lastDBFailureTime) > 30*time.Second {
+				klog.Infof("Database connectivity restored, transitioning back to NORMAL state")
+				lc.controllerState = StateNormal
+
+				// Update monitoring
+				if lc.monitoringServer != nil {
+					lc.monitoringServer.UpdateDBStatus(true, 0)
+					lc.monitoringServer.SetControllerState(string(StateNormal))
+					lc.monitoringServer.ClearError()
+				}
+			}
+		}
+	} else {
+		// Increment failure count
+		lc.dbFailureCount++
+
+		// If this is the first failure in a sequence, record the time
+		if lc.lastDBFailureTime.Before(lc.lastDBSuccessTime) {
+			lc.lastDBFailureTime = time.Now()
+		}
+
+		klog.Warningf("Database health check failed (consecutive failures: %d, duration: %v)",
+			lc.dbFailureCount, time.Since(lc.lastDBFailureTime))
+	}
+}
+
+// transitionToSplitBrainRiskState handles the transition to split-brain risk state
+func (lc *LeaderController) transitionToSplitBrainRiskState(context.Context) {
+	lc.controllerState = StateSplitBrainRisk
+
+	// If we're the leader, we need to give up leadership
+	if lc.IsLeader() {
+		klog.Errorf("Giving up leadership due to prolonged database failure (%v)",
+			time.Since(lc.lastDBFailureTime))
+
+		// Update state
+		lc.leaderMutex.Lock()
+		lc.isLeader = false
+		lc.leaderMutex.Unlock()
+
+		// Stop workloads only if split-brain protection is enabled
+		if lc.enableSplitBrainProtection {
+			klog.Errorf("Split-brain protection enabled, stopping all workloads")
+			if err := lc.stopWorkloads(); err != nil {
+				klog.Errorf("Failed to stop workloads during split-brain protection: %v", err)
+			}
+
+			// Log that manual intervention is required
+			klog.Errorf("MANUAL INTERVENTION REQUIRED: Controller has stopped all workloads due to prolonged " +
+				"database connection failure. Please check database connectivity and ensure no split-brain " +
+				"condition has occurred before restarting the controller.")
+		} else {
+			klog.Warningf("Split-brain protection is disabled - maintaining workloads despite database " +
+				"connectivity loss. THIS IS POTENTIALLY DANGEROUS AND MAY LEAD TO SPLIT-BRAIN SCENARIOS.")
+		}
+
+		// Update monitoring
+		if lc.monitoringServer != nil {
+			lc.monitoringServer.UpdateLeaderStatus(false, lc.id, lc.cluster.Name)
+			lc.monitoringServer.UpdateDBStatus(false, 0)
+			lc.monitoringServer.SetControllerState(string(StateSplitBrainRisk))
+
+			errorMsg := fmt.Sprintf("prolonged database failure (%v), gave up leadership",
+				time.Since(lc.lastDBFailureTime))
+			if lc.enableSplitBrainProtection {
+				errorMsg += ", stopped workloads to prevent split-brain, MANUAL INTERVENTION REQUIRED"
+			} else {
+				errorMsg += ", split-brain protection disabled (DANGEROUS)"
+			}
+
+			lc.monitoringServer.SetError(fmt.Errorf(errorMsg))
+
+			// Update metrics
+			lc.metrics.IsLeader.Set(0)
+			lc.metrics.LeadershipLosses.Inc()
+		}
+	}
+}
+
+// checkDatabaseHealth performs a simple database health check
+func (lc *LeaderController) checkDatabaseHealth(ctx context.Context) bool {
+	// Create a context with short timeout for the health check
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	// Attempt to get the lock info as a health check
+	_, err := lc.storage.GetLockInfo(healthCtx, lc.leaderLockKey)
+
+	return err == nil
+}
+
+// recordDBError records a database error and updates state if needed
+func (lc *LeaderController) recordDBError(err error) {
+	lc.dbFailureMutex.Lock()
+	defer lc.dbFailureMutex.Unlock()
+
+	lc.dbFailureCount++
+
+	// If this is the first failure in a sequence, record the time
+	if lc.lastDBFailureTime.Before(lc.lastDBSuccessTime) {
+		lc.lastDBFailureTime = time.Now()
+	}
+
+	// Report the error to monitoring
+	if lc.monitoringServer != nil {
+		lc.monitoringServer.SetError(fmt.Errorf("database error: %w", err))
+		lc.monitoringServer.UpdateDBStatus(false, 0)
+	}
+
+	// Log the error
+	klog.Warningf("Database error detected (consecutive failures: %d, duration: %v): %v",
+		lc.dbFailureCount, time.Since(lc.lastDBFailureTime), err)
+
+	// Update metrics
+	if lc.metrics != nil {
+		lc.metrics.DBErrors.WithLabelValues("unknown", "connection").Inc()
+	}
+}
+
+// recordDBSuccess records a successful database operation
+func (lc *LeaderController) recordDBSuccess() {
+	lc.dbFailureMutex.Lock()
+	defer lc.dbFailureMutex.Unlock()
+
+	// Reset counters and update last success time
+	lc.lastDBSuccessTime = time.Now()
+	lc.dbFailureCount = 0
+
+	// If we were in a degraded state but now recovered, transition back to normal
+	if lc.controllerState != StateNormal &&
+		time.Since(lc.lastDBFailureTime) > lc.recoveryStabilizationPeriod {
+
+		previousState := lc.controllerState
+
+		// If we're in SPLIT_BRAIN_RISK, first transition to DEGRADED_DB
+		if lc.controllerState == StateSplitBrainRisk {
+			if lc.enableSplitBrainProtection {
+				klog.Warningf("Database connectivity restored, but maintaining SPLIT_BRAIN_RISK state. " +
+					"MANUAL INTERVENTION REQUIRED to ensure no split-brain condition before resuming.")
+				return
+			} else {
+				klog.Infof("Database connectivity restored after split-brain risk, " +
+					"transitioning to DEGRADED_DB state")
+				lc.controllerState = StateDegradedDB
+			}
+		} else if lc.controllerState == StateDegradedDB {
+			klog.Infof("Database connectivity fully restored, transitioning back to NORMAL state")
+			lc.controllerState = StateNormal
+		}
+
+		// If we actually changed state, update monitoring
+		if previousState != lc.controllerState {
+			// Update monitoring
+			if lc.monitoringServer != nil {
+				lc.monitoringServer.UpdateDBStatus(true, 0)
+				lc.monitoringServer.SetControllerState(string(lc.controllerState))
+
+				// Only clear errors if we're fully back to normal
+				if lc.controllerState == StateNormal {
+					lc.monitoringServer.ClearError()
+				}
+			}
+		}
+	}
 }
