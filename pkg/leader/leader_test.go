@@ -1159,9 +1159,19 @@ func waitForCondition(timeout time.Duration, condition func() bool) bool {
 func TestLeaderElection(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
+
+	//go func() {
+	//	select {
+	//	case <-ctx.Done():
+	//		if ctx.Err() == context.DeadlineExceeded {
+	//			fmt.Println("=== GOROUTINE DUMP ON TEST TIMEOUT ===")
+	//			pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+	//			fmt.Println("=== END GOROUTINE DUMP ===")
+	//		}
+	//	}
+	//}()
 
 	// Create controllers
 	controller1 := env.CreateController("controller-1", "tenant")
@@ -1190,7 +1200,7 @@ func TestLeaderElection(t *testing.T) {
 	}
 
 	// Stop the first controller to simulate failure
-	t.Log("Stopping controller 1 to simulate failure")
+	t.Logf("Stopping controller 1 to simulate failure %s", common.GetElapsedTime(ctx))
 	err = controller1.Stop(ctx)
 	require.NoError(t, err)
 
@@ -1200,10 +1210,15 @@ func TestLeaderElection(t *testing.T) {
 	})
 	require.True(t, success, "Leadership should transfer to controller 2")
 
+	// Wait for background work to start
+	time.Sleep(5 * time.Second)
+
 	// Verify workloads were stopped on controller1 and started on controller2
 	if env.mode == MockMode {
-		require.Equal(t, 2, env.mockWorkloadMgr.GetStartCalls(), "Workloads should be started on controller 2")
-		require.Equal(t, 1, env.mockWorkloadMgr.GetStopCalls(), "Workloads should be stopped on controller 1")
+		require.Equal(t, 2, env.mockWorkloadMgr.GetStartCalls(), "Workloads should be started on controller 2: %v [elapsed %s]",
+			controller2.IsLeader(), common.GetElapsedTime(ctx))
+		require.Equal(t, 1, env.mockWorkloadMgr.GetStopCalls(), "Workloads should be stopped on controller 1: %v [elapsed %s]",
+			controller2.IsLeader(), common.GetElapsedTime(ctx))
 	}
 
 	// Stop the second controller
@@ -1220,7 +1235,7 @@ func TestMultiTenantLeadership(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Create controllers for different tenants
@@ -1259,7 +1274,7 @@ func TestWorkloadFailover(t *testing.T) {
 	// Clean up storage keys before starting
 	env.cleanupStorageKeys()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Create controllers
@@ -1301,6 +1316,9 @@ func TestWorkloadFailover(t *testing.T) {
 	})
 	require.True(t, success, "Leadership should transfer to controller 2")
 
+	// Wait for background work to start
+	time.Sleep(3 * time.Second)
+
 	if env.mode == MockMode {
 		require.Equal(t, 2, env.mockWorkloadMgr.GetStartCalls(), "Workloads should be started on controller 2")
 		require.Equal(t, 1, env.mockWorkloadMgr.GetStopCalls(), "Workloads should be stopped on controller 1")
@@ -1311,7 +1329,7 @@ func TestWorkloadErrorHandling(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Set up workload manager to return errors
@@ -1345,7 +1363,7 @@ func TestMetricsReporting(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Create and start a controller
@@ -1381,7 +1399,7 @@ func TestStorageImplementations(t *testing.T) {
 		env := NewTestEnv(t, "")
 		defer env.Cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 		defer cancel()
 
 		// Create controllers
@@ -1421,7 +1439,7 @@ func TestStorageImplementations(t *testing.T) {
 		env := NewTestEnv(t, "")
 		defer env.Cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 		defer cancel()
 
 		// Create controllers
@@ -1458,7 +1476,7 @@ func TestLeaderFailoverWithWorkloads(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 35*time.Second)
 	defer cancel()
 
 	// Create workload managers for each controller
@@ -1549,7 +1567,7 @@ func TestConcurrentLeaderElection(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Create multiple controllers
@@ -1629,7 +1647,7 @@ func TestLeaderLockExpiration(t *testing.T) {
 	defer env.Cleanup()
 
 	// Use a longer timeout for integration testing
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 2*time.Minute)
 	defer cancel()
 
 	// Create controllers
@@ -1752,7 +1770,7 @@ func TestClusterHealthCheck(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 15*time.Second)
 	defer cancel()
 
 	// Create a controller
@@ -1810,7 +1828,7 @@ func TestRealWorkloads(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 120*time.Second)
 	defer cancel()
 
 	// Create a real workload manager
@@ -1929,7 +1947,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 		env.Cleanup()
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 3*time.Minute)
 	defer cancel()
 
 	// Create a real workload manager instead of the mock
@@ -2107,7 +2125,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 
 	// Stop the controller
 	t.Log("Stopping controller...")
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 35*time.Second)
+	stopCtx, stopCancel := context.WithTimeout(common.StoreStartTime(context.Background()), 35*time.Second)
 	defer stopCancel()
 	err = controller.Stop(stopCtx)
 	require.NoError(t, err)
@@ -2261,7 +2279,7 @@ func TestProcessManagerWithMultipleProcesses(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 100*time.Second)
 	defer cancel()
 
 	// Create a temporary directory for process configs
@@ -2454,7 +2472,7 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 35*time.Second)
 	defer cancel()
 
 	// Create workload managers for each controller
@@ -2591,7 +2609,7 @@ func TestRealWorldScenario(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 35*time.Second)
 	defer cancel()
 
 	// Create a temporary directory for configs
@@ -2755,7 +2773,7 @@ func TestDockerCommandExecution(t *testing.T) {
 	env := NewTestEnv(t, "")
 	defer env.Cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 35*time.Second)
 	defer cancel()
 
 	// Create a workload manager
@@ -2857,7 +2875,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 		env := NewTestEnv(t, "")
 		defer env.Cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 10*time.Second)
 		defer cancel()
 
 		// Create a simple process workload
@@ -2930,7 +2948,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 		env := NewTestEnv(t, "")
 		defer env.Cleanup()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(common.StoreStartTime(context.Background()), 10*time.Second)
 		defer cancel()
 
 		// Create a simple process workload

@@ -140,8 +140,8 @@ func (p *ProcessWorkload) Start(ctx context.Context, client kubernetes.Interface
 		return fmt.Errorf("failed to create or update pod: %w", err)
 	}
 
-	// Start monitoring the pod
-	go p.monitorPod(ctx)
+	// Start monitoring the pod for status updates
+	go p.periodicStatusUpdater(ctx)
 
 	// Start watching for pod terminations
 	go p.watchPodTerminations(ctx)
@@ -463,8 +463,8 @@ func (p *ProcessWorkload) buildPod() (*corev1.Pod, error) {
 	return pod, nil
 }
 
-// monitorPod monitors the pod status
-func (p *ProcessWorkload) monitorPod(ctx context.Context) {
+// periodicStatusUpdater monitors the pod status
+func (p *ProcessWorkload) periodicStatusUpdater(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -492,10 +492,7 @@ func (p *ProcessWorkload) monitorPod(ctx context.Context) {
 				active := p.status.Active
 				p.statusMutex.RUnlock()
 				if active {
-					klog.Warningf("Pod %s not found, recreating", p.podName)
-					if err := p.createOrUpdatePod(ctx); err != nil {
-						klog.Errorf("Failed to recreate pod: %v", err)
-					}
+					klog.Warningf("Pod %s not found, it should be recreated", p.podName)
 				}
 
 				continue
@@ -527,7 +524,7 @@ func (p *ProcessWorkload) updatePodStatus(pod *corev1.Pod) {
 				}
 			}
 
-			s.Healthy = allReady && p.monitoringServer.GetHealthStatus().IsLeader
+			s.Healthy = allReady && p.monitoringServer.IsLeaderAndNormal()
 
 			if !allReady {
 				s.LastError = "Not all containers are ready"
@@ -536,7 +533,7 @@ func (p *ProcessWorkload) updatePodStatus(pod *corev1.Pod) {
 			}
 		} else if pod.Status.Phase == corev1.PodSucceeded {
 			s.Active = false
-			s.Healthy = p.monitoringServer.GetHealthStatus().IsLeader
+			s.Healthy = p.monitoringServer.IsLeaderAndNormal()
 			s.LastError = ""
 		} else if pod.Status.Phase == corev1.PodFailed {
 			s.Active = false

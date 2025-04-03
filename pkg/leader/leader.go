@@ -58,6 +58,7 @@ import (
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"github.com/bhatti/k8-highlander/pkg/storage"
 	"github.com/bhatti/k8-highlander/pkg/workloads"
+	"github.com/go-redis/redis/v8"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -76,11 +77,14 @@ const (
 	LockTTL             = 60 * time.Second
 	RenewInterval       = 5 * time.Second
 
+	// Constants for DB failure tolerance
+	maxConsecutiveDBFailures = 3
+
 	// Constants for workload management
 	workloadOwnerAnnotation    = "k8-highlander/owner"
 	workloadShutdownAnnotation = "k8-highlander/controlled-shutdown"
 	maxWorkloadWaitTime        = 60 * time.Second
-	workloadCheckInterval      = 5 * time.Second
+	workloadCheckInterval      = 2 * time.Second
 )
 
 // LeaderController manages the leader election process and workload lifecycle.
@@ -95,11 +99,14 @@ type LeaderController struct {
 	workloadManager  workloads.Manager
 	leaderLockKey    string
 
-	isLeader       bool
-	leaderMutex    sync.RWMutex
-	workloadCtx    context.Context
-	workloadCancel context.CancelFunc
-	stopCh         chan struct{}
+	isLeader        bool
+	controllerState common.ControllerState
+	dbFailureCount  int
+	stateMutex      sync.RWMutex
+	workloadMutex   sync.RWMutex
+	workloadCtx     context.Context
+	workloadCancel  context.CancelFunc
+	stopCh          chan struct{}
 
 	// Track previous leader for failover
 	previousLeader string
@@ -129,6 +136,7 @@ func NewLeaderController(
 		tenant = defaultTenant
 	}
 
+	monitoringServer.UpdateControllerState(common.StateNormal)
 	return &LeaderController{
 		storage:          storage,
 		id:               id,
@@ -138,12 +146,16 @@ func NewLeaderController(
 		workloadManager:  workloadManager,
 		leaderLockKey:    fmt.Sprintf(leaderLockKeyFormat, tenant),
 		stopCh:           make(chan struct{}),
+		controllerState:  common.StateNormal,
+		dbFailureCount:   0,
 	}
 }
 
 // Start begins the leader election process, setting up monitoring and attempting
 // to acquire leadership immediately.
 func (lc *LeaderController) Start(ctx context.Context) error {
+	ctx = common.StoreStartTime(ctx)
+	started := time.Now()
 	// Start monitoring cluster health
 	go lc.monitorClusterHealth(ctx)
 
@@ -158,9 +170,7 @@ func (lc *LeaderController) Start(ctx context.Context) error {
 
 	// Try to acquire leadership immediately
 	if lc.TryAcquireLeadership(ctx) {
-		lc.leaderMutex.Lock()
-		lc.isLeader = true
-		lc.leaderMutex.Unlock()
+		lc.SetLeader(true)
 
 		// Create a workload context
 		lc.createWorkloadContext(ctx)
@@ -170,7 +180,7 @@ func (lc *LeaderController) Start(ctx context.Context) error {
 		go func() {
 			// Wait for any existing workloads to terminate before starting new ones
 			if err := lc.waitForPreviousWorkloads(ctx); err != nil {
-				klog.Warningf("Error waiting for previous workloads: %v", err)
+				klog.Warningf("Start error waiting for previous workloads: %v [elapsed %s]", err, time.Since(started))
 			}
 
 			// Start workloads
@@ -179,7 +189,7 @@ func (lc *LeaderController) Start(ctx context.Context) error {
 					klog.Errorf("Encountered severe error starting workloads, stopping controller: %v", err)
 					// Release leadership since we can't properly function
 					lc.releaseLeadership(ctx)
-					lc.isLeader = false
+					lc.SetLeader(false)
 					return
 				}
 
@@ -196,11 +206,11 @@ func (lc *LeaderController) Start(ctx context.Context) error {
 // Stop gracefully shuts down the leader controller, releasing leadership if held
 // and stopping managed workloads.
 func (lc *LeaderController) Stop(ctx context.Context) error {
-	klog.Infof("Stopping leader controller with ID %s", lc.id)
+	klog.Infof("Stopping leader controller with ID %s [elapsed %s]", lc.id, common.GetElapsedTime(ctx))
 
 	// Use a mutex to ensure thread safety
-	lc.leaderMutex.Lock()
-	defer lc.leaderMutex.Unlock()
+	lc.workloadMutex.Lock()
+	defer lc.workloadMutex.Unlock()
 
 	// Check if already stopped
 	select {
@@ -218,15 +228,15 @@ func (lc *LeaderController) Stop(ctx context.Context) error {
 		releaseCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		// Release leadership
-		klog.Infof("Releasing leadership...")
+		klog.Infof("Releasing leadership %s...", lc.id)
 		lc.releaseLeadership(releaseCtx)
-		lc.isLeader = false
+		lc.SetLeader(false)
 
 		// Stop workloads with the original context
-		klog.Infof("Stopping all workloads...")
+		klog.Infof("Stopping all workloads %s...", lc.id)
 		if err := lc.workloadManager.StopAll(ctx); err != nil {
-			klog.Errorf("Failed to stop workloads: %v", err)
-			lc.monitoringServer.SetError(fmt.Errorf("failed to stop workloads: %w", err))
+			klog.Errorf("Failed to stop workloads %s: %v", lc.id, err)
+			lc.monitoringServer.SetError(fmt.Errorf("failed to stop workloads %s: %w", lc.id, err))
 		}
 
 		// Clean up the workload manager
@@ -237,6 +247,44 @@ func (lc *LeaderController) Stop(ctx context.Context) error {
 	klog.Infof("Leader controller with ID %s stopped", lc.id)
 
 	return nil
+}
+
+func (lc *LeaderController) resetDBFailures() {
+	lc.stateMutex.Lock()
+	lc.dbFailureCount = 0
+	lc.stateMutex.Unlock()
+}
+
+func (lc *LeaderController) incrDBFailures() {
+	lc.stateMutex.Lock()
+	lc.dbFailureCount++
+	lc.stateMutex.Unlock()
+}
+
+func (lc *LeaderController) getDBFailures() int {
+	lc.stateMutex.RLock()
+	defer lc.stateMutex.RUnlock()
+	return lc.dbFailureCount
+}
+
+func (lc *LeaderController) GetControllerState() common.ControllerState {
+	lc.stateMutex.RLock()
+	defer lc.stateMutex.RUnlock()
+	return lc.controllerState
+}
+
+func (lc *LeaderController) SetControllerState(state common.ControllerState) {
+	lc.stateMutex.Lock()
+	defer lc.stateMutex.Unlock()
+
+	// Only log if state is changing
+	if lc.controllerState != state {
+		klog.V(4).Infof("Controller state changing from %s to %s", lc.controllerState, state)
+		lc.controllerState = state
+
+		// Update monitoring status
+		lc.monitoringServer.UpdateControllerState(state)
+	}
 }
 
 // TryAcquireLeadership attempts to acquire leadership by obtaining a distributed lock.
@@ -257,7 +305,21 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	// Get the current leader (if any) before we try to acquire
 	currentLeader, err := lc.getCurrentLeader(ctx)
 	if err != nil {
-		klog.Errorf("Error getting current leader: %v", err)
+		klog.Warningf("Error getting current leader: %v  (failure count: %d)", err, lc.getDBFailures())
+
+		if isConnectionError(err) {
+			lc.incrDBFailures()
+
+			if lc.GetControllerState() != common.StateDegraded {
+				klog.Warningf("Setting controller state to Degraded (failure count: %d)", lc.getDBFailures())
+				lc.SetControllerState(common.StateDegraded)
+				lc.monitoringServer.UpdateControllerState(common.StateDegraded)
+			}
+		}
+
+		// If we're not already leader or exceeded failure threshold, return false
+		lc.metrics.LeadershipFailedAttempts.Inc()
+		lc.monitoringServer.SetError(fmt.Errorf("failed to acquire leadership: %w", err))
 		// Continue anyway, but log the error
 	}
 
@@ -298,10 +360,24 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	lc.metrics.RecordDBOperation("setNX", duration, err)
 
 	if err != nil {
-		klog.Errorf("Error trying to acquire leadership: %v", err)
+		klog.Errorf("Error trying to acquire leadership: %v (failure count %d)", err, lc.getDBFailures())
 		lc.metrics.LeadershipFailedAttempts.Inc()
-		lc.monitoringServer.SetError(fmt.Errorf("failed to acquire leadership: %w", err))
+		lc.monitoringServer.SetError(fmt.Errorf("failed to acquire leadership: %w (failure count %d)", err, lc.getDBFailures()))
 		return false
+	}
+
+	// Reset DB failure count on successful DB operation
+	{
+		if lc.getDBFailures() > 0 {
+			klog.Infof("DB connection restored, resetting failure count (was %d)", lc.getDBFailures())
+			lc.resetDBFailures()
+		}
+
+		if lc.GetControllerState() == common.StateDegraded {
+			klog.Infof("DB connection restored, setting controller state back to Normal")
+			lc.SetControllerState(common.StateNormal)
+			lc.monitoringServer.UpdateControllerState(common.StateNormal)
+		}
 	}
 
 	// Only update status if we successfully acquired the lock
@@ -332,16 +408,16 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 
 		verifyLeader, verifyErr := lc.getCurrentLeader(ctx)
 		if verifyErr != nil {
-			klog.Errorf("Error verifying leadership acquisition: %v", verifyErr)
+			klog.Errorf("Error verifying leadership acquisition: %v [elapsed %s]", verifyErr, time.Since(startTime))
 		} else if verifyLeader != lc.id {
-			klog.Warningf("Leadership verification failed! Expected %s, got %s", lc.id, verifyLeader)
+			klog.Warningf("Leadership verification failed! Expected %s, got %s [elapsed %s]", lc.id, verifyLeader, time.Since(startTime))
 		} else {
-			klog.Infof("Leadership acquisition verified successfully")
+			klog.Infof("Leadership acquisition verified successfully [elapsed %s]", time.Since(startTime))
 		}
 
 		return true
 	} else {
-		klog.V(4).Infof("Failed to acquire leadership, lock already held")
+		klog.V(4).Infof("Failed to acquire leadership, lock already held [elapsed %s]", time.Since(startTime))
 
 		// Update monitoring
 		lc.monitoringServer.UpdateLeaderStatus(false, lc.id, lc.cluster.Name)
@@ -369,12 +445,53 @@ func (lc *LeaderController) RenewLeadership(ctx context.Context) bool {
 	// Record Redis operation
 	lc.metrics.RecordDBOperation("get", duration, err)
 
+	// Handle DB errors with more resilience
 	if err != nil {
-		klog.Errorf("Error checking leadership: %v", err)
+		klog.Warningf("Error checking leadership: %v", err)
 		lc.monitoringServer.SetError(fmt.Errorf("error checking leadership: %w", err))
+
+		if isConnectionError(err) {
+			// Increment failure count
+			lc.incrDBFailures()
+
+			// Set to degraded state when we have DB failures
+			if lc.GetControllerState() != common.StateDegraded {
+				klog.Warningf("Setting controller state to Degraded after DB error (failure count: %d)",
+					lc.getDBFailures())
+				lc.SetControllerState(common.StateDegraded)
+				lc.monitoringServer.UpdateControllerState(common.StateDegraded)
+			}
+
+			// Only give up leadership after consecutive failures exceed threshold
+			if lc.getDBFailures() >= maxConsecutiveDBFailures {
+				klog.Errorf("DB failure count (%d) exceeded maximum (%d), relinquishing leadership",
+					lc.getDBFailures(), maxConsecutiveDBFailures)
+				return false
+			}
+
+			klog.Warningf("Temporary DB error, maintaining leadership (failure count: %d)", lc.getDBFailures())
+
+			// We still return true to maintain leadership during temporary DB issues
+			return true
+		}
+		// For non-connection errors, handle normally (don't maintain leadership)
 		return false
 	}
 
+	// DB operation succeeded, reset failure count and state if needed
+	{
+		if lc.getDBFailures() > 0 {
+			klog.Infof("DB connection restored, resetting failure count (was %d)", lc.getDBFailures())
+			lc.resetDBFailures()
+		}
+
+		if lc.GetControllerState() == common.StateDegraded {
+			klog.Infof("DB connection restored, setting controller state back to Normal")
+			lc.SetControllerState(common.StateNormal)
+			lc.monitoringServer.UpdateControllerState(common.StateNormal)
+		}
+
+	}
 	if val == "" {
 		// Key doesn't exist, try to reacquire
 		klog.Warning("Leadership key doesn't exist, trying to reacquire")
@@ -404,16 +521,51 @@ func (lc *LeaderController) RenewLeadership(ctx context.Context) bool {
 	lc.metrics.RecordDBOperation("expire", duration, err)
 
 	if err != nil {
-		klog.Errorf("Error renewing leadership: %v", err)
+		klog.Warningf("Error renewing leadership: %v", err)
 		lc.monitoringServer.SetError(fmt.Errorf("error renewing leadership: %w", err))
+		if isConnectionError(err) {
+			// Increment failure count
+			lc.incrDBFailures()
+
+			// Set to degraded state
+			if lc.GetControllerState() != common.StateDegraded {
+				klog.Warningf("Setting controller state to Degraded (failure count: %d)", lc.getDBFailures())
+				lc.SetControllerState(common.StateDegraded)
+				lc.monitoringServer.UpdateControllerState(common.StateDegraded)
+			}
+
+			// Only give up leadership after consecutive failures exceed threshold
+			if lc.getDBFailures() >= maxConsecutiveDBFailures {
+				klog.Errorf("DB failure count (%d) exceeded maximum (%d), relinquishing leadership",
+					lc.getDBFailures(), maxConsecutiveDBFailures)
+				return false
+			}
+
+			return true // Maintain leadership during temporary failures
+		}
+
 		return false
 	}
 
-	// Get TTL for metrics
-	ttl, _ := lc.storage.GetLockTTL(ctx, lc.leaderLockKey)
+	// DB operation succeeded, reset failure count and state if needed
+	{
+		if lc.getDBFailures() > 0 {
+			klog.Infof("DB connection restored, resetting failure count (was %d)", lc.getDBFailures())
+			lc.resetDBFailures()
+		}
 
-	// Update TTL metric
-	lc.metrics.DBLockTTL.Set(ttl.Seconds())
+		if lc.GetControllerState() == common.StateDegraded {
+			klog.Infof("DB connection restored, setting controller state back to Normal")
+			lc.SetControllerState(common.StateNormal)
+			lc.monitoringServer.UpdateControllerState(common.StateNormal)
+		}
+	}
+
+	// Get TTL for metrics
+	if ttl, err := lc.storage.GetLockTTL(ctx, lc.leaderLockKey); err == nil {
+		// Update TTL metric
+		lc.metrics.DBLockTTL.Set(ttl.Seconds())
+	}
 
 	return success
 }
@@ -478,9 +630,15 @@ func (lc *LeaderController) GetMetrics() *monitoring.ControllerMetrics {
 
 // IsLeader returns whether this controller is currently the leader
 func (lc *LeaderController) IsLeader() bool {
-	lc.leaderMutex.Lock()
-	defer lc.leaderMutex.Unlock()
+	lc.stateMutex.RLock()
+	defer lc.stateMutex.RUnlock()
 	return lc.isLeader
+}
+
+func (lc *LeaderController) SetLeader(leader bool) {
+	lc.stateMutex.Lock()
+	lc.isLeader = leader
+	lc.stateMutex.Unlock()
 }
 
 // TriggerClusterHealthCheck manually triggers a cluster health check (for testing)
@@ -493,8 +651,8 @@ func (lc *LeaderController) TriggerClusterHealthCheck(ctx context.Context) {
 
 	// If cluster is not healthy, and we're the leader, we should release leadership
 	if !isHealthy && lc.IsLeader() {
-		lc.leaderMutex.Lock()
-		defer lc.leaderMutex.Unlock()
+		lc.workloadMutex.Lock()
+		defer lc.workloadMutex.Unlock()
 
 		klog.Warning("Cluster is unhealthy, releasing leadership")
 
@@ -503,7 +661,7 @@ func (lc *LeaderController) TriggerClusterHealthCheck(ctx context.Context) {
 
 		// Release leadership
 		lc.releaseLeadership(ctx)
-		lc.isLeader = false
+		lc.SetLeader(false)
 
 		// Stop workloads
 		_ = lc.stopWorkloads()
@@ -517,7 +675,7 @@ func (lc *LeaderController) TriggerClusterHealthCheck(ctx context.Context) {
 
 // monitorClusterHealth monitors the health of clusters
 func (lc *LeaderController) monitorClusterHealth(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -535,14 +693,14 @@ func (lc *LeaderController) monitorClusterHealth(ctx context.Context) {
 
 			// If cluster is not healthy, and we're the leader, we should release leadership
 			if !isHealthy && lc.IsLeader() {
-				lc.leaderMutex.Lock()
+				lc.workloadMutex.Lock()
 				klog.Warning("Cluster is unhealthy, releasing leadership")
 
 				startTime := time.Now()
 
 				// Release leadership
 				lc.releaseLeadership(ctx)
-				lc.isLeader = false
+				lc.SetLeader(false)
 
 				// Stop workloads
 				_ = lc.stopWorkloads()
@@ -551,7 +709,7 @@ func (lc *LeaderController) monitorClusterHealth(ctx context.Context) {
 				// We don't know the new leader yet, but we record that we released leadership
 				lc.monitoringServer.RecordFailover(lc.id, "", duration,
 					fmt.Errorf("released leadership due to unhealthy cluster"))
-				lc.leaderMutex.Unlock()
+				lc.workloadMutex.Unlock()
 			}
 		}
 	}
@@ -600,15 +758,15 @@ func (lc *LeaderController) monitorLock(ctx context.Context) {
 			}
 
 			if err != nil {
-				klog.Errorf("Lock monitoring: Error checking lock: %v", err)
+				klog.Errorf("Lock monitoring: Error checking lock: %v (failure count %d)", err, lc.getDBFailures())
 
 				// Update Redis status
-				lc.monitoringServer.UpdateDBStatus(false, 0)
+				lc.monitoringServer.UpdateDBStatus(false, 0, lc.getDBFailures())
 			} else if val == "" {
 				klog.V(4).Info("Lock monitoring: No lock currently held")
 
 				// Update Redis status
-				lc.monitoringServer.UpdateDBStatus(true, 0)
+				lc.monitoringServer.UpdateDBStatus(true, 0, lc.getDBFailures())
 
 				// Clear current leader
 				lc.monitoringServer.UpdateCurrentLeader("")
@@ -620,7 +778,7 @@ func (lc *LeaderController) monitorLock(ctx context.Context) {
 					val, ttl.String(), lc.id)
 
 				// Update Redis status
-				lc.monitoringServer.UpdateDBStatus(true, ttl.Seconds())
+				lc.monitoringServer.UpdateDBStatus(true, ttl.Seconds(), lc.getDBFailures())
 
 				// Update TTL metric
 				lc.metrics.DBLockTTL.Set(ttl.Seconds())
@@ -629,12 +787,12 @@ func (lc *LeaderController) monitorLock(ctx context.Context) {
 				lc.monitoringServer.UpdateCurrentLeader(val)
 
 				// If we previously thought we were the leader but the key shows someone else...
-				lc.leaderMutex.Lock()
-				if lc.isLeader && val != lc.id {
+				lc.workloadMutex.Lock()
+				if lc.IsLeader() && val != lc.id {
 					klog.Warningf("Leadership taken by another instance: %s", val)
 
 					// Update our state
-					lc.isLeader = false
+					lc.SetLeader(false)
 
 					// Stop workloads
 					_ = lc.stopWorkloads()
@@ -646,7 +804,7 @@ func (lc *LeaderController) monitorLock(ctx context.Context) {
 					// Update monitoring
 					lc.monitoringServer.UpdateLeaderStatus(false, lc.id, lc.cluster.Name)
 				}
-				lc.leaderMutex.Unlock()
+				lc.workloadMutex.Unlock()
 			}
 		}
 	}
@@ -654,31 +812,39 @@ func (lc *LeaderController) monitorLock(ctx context.Context) {
 
 // runLeaderElectionLoop runs the main leader election loop
 func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
-	started := time.Now()
 	ticker := time.NewTicker(RenewInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			klog.Infof("Context canceled, stopping leader election loop [elapsed: %s]", time.Since(started))
+			klog.Infof("Context canceled/done, stopping leader election loop [elapsed: %s]",
+				common.GetElapsedTime(ctx))
 			return
 		case <-lc.stopCh:
-			klog.Infof("Leader controller stopped, stopping leader election loop [elapsed: %s]", time.Since(started))
+			klog.Infof("Leader controller stopped, stopping leader election loop [elapsed: %s]",
+				common.GetElapsedTime(ctx))
 			return
 		case <-ticker.C:
-			lc.leaderMutex.Lock()
+			lc.workloadMutex.Lock()
 
 			if lc.isLeader {
 				// If we're the leader, try to renew
 				if !lc.RenewLeadership(ctx) {
-					klog.Infof("Leadership lost during renewal [elapsed: %s]", time.Since(started))
+					klog.Infof("Leadership lost during renewal [elapsed: %s]",
+						common.GetElapsedTime(ctx))
 
 					// Get the new leader (if any)
-					newLeader, _ := lc.getCurrentLeader(ctx)
+					newLeader, err := lc.getCurrentLeader(ctx)
 
+					if err != nil {
+						klog.Warningf("Could not get current leader after losing during renewal: %s [elapsed: %s]",
+							err, common.GetElapsedTime(ctx))
+					} else {
+						lc.resetDBFailures()
+					}
 					// Update state
-					lc.isLeader = false
+					lc.SetLeader(false)
 
 					startTime := time.Now()
 					lc.monitoringServer.RecordFailover(lc.id, newLeader, time.Since(startTime),
@@ -695,10 +861,12 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 				previousLeader, _ := lc.getCurrentLeader(ctx)
 				// If we're not the leader, try to acquire
 				if lc.TryAcquireLeadership(ctx) {
-					klog.Infof("Leadership acquired on cluster %s [elapsed: %s]", lc.cluster.Name, time.Since(started))
+					klog.Infof("Leadership acquired on cluster %s [elapsed: %s]",
+						lc.cluster.Name, common.GetElapsedTime(ctx))
 
 					// Update state
-					lc.isLeader = true
+					lc.SetLeader(true)
+					lc.resetDBFailures()
 
 					// Create a new workload context
 					lc.createWorkloadContext(ctx)
@@ -706,13 +874,13 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 					// Wait for previous workloads to terminate before starting new ones
 					if err := lc.waitForPreviousWorkloads(ctx); err != nil {
 						klog.Warningf("Error waiting for previous workloads: %v [elapsed: %s]",
-							err, time.Since(started))
+							err, common.GetElapsedTime(ctx))
 					}
 
 					// Start workloads
 					if err := lc.startWorkloads(); err != nil {
 						klog.Errorf("Failed to restart workload upon failover: %s [elapsed: %s]",
-							err, time.Since(started))
+							err, common.GetElapsedTime(ctx))
 					}
 
 					// Update monitoring
@@ -725,7 +893,7 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 				}
 			}
 
-			lc.leaderMutex.Unlock()
+			lc.workloadMutex.Unlock()
 		}
 	}
 }
@@ -764,8 +932,8 @@ func (lc *LeaderController) createWorkloadContext(ctx context.Context) {
 // waitForPreviousWorkloads waits for workloads from the previous leader to terminate
 func (lc *LeaderController) waitForPreviousWorkloads(ctx context.Context) error {
 	// Log the current state
-	klog.Infof("waitForPreviousWorkloads: previousLeader=%s, isSelfRestart=%v",
-		lc.previousLeader, lc.isSelfRestart)
+	klog.Infof("waitForPreviousWorkloads: current=%s, previousLeader=%s, isSelfRestart=%v",
+		lc.id, lc.previousLeader, lc.isSelfRestart)
 
 	// If this is a restart of the same leader, we can potentially reuse our own workloads
 	if lc.isSelfRestart {
@@ -784,8 +952,8 @@ func (lc *LeaderController) waitForPreviousWorkloads(ctx context.Context) error 
 			lc.monitoringServer.GetLeaderInfo())
 		return nil
 	} else {
-		klog.Infof("Waiting for workloads from previous leader %s to terminate [%v]",
-			lc.previousLeader, lc.monitoringServer.GetLeaderInfo())
+		klog.Infof("Waiting for workloads from previous leader %s to terminate [%v wait %s/%s]",
+			lc.previousLeader, lc.monitoringServer.GetLeaderInfo(), workloadCheckInterval, maxWorkloadWaitTime)
 	}
 
 	// Rest of the method remains the same...
@@ -800,7 +968,8 @@ func (lc *LeaderController) waitForPreviousWorkloads(ctx context.Context) error 
 	for {
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("timed out waiting for previous workloads to terminate")
+			return fmt.Errorf("timed out waiting for previous workloads to terminate [wait %s/%s]",
+				workloadCheckInterval, maxWorkloadWaitTime)
 		case <-ticker.C:
 			// Check if there are any pods with the controlled-shutdown annotation
 			pods, err := lc.GetClient().CoreV1().Pods("").List(ctx, metav1.ListOptions{
@@ -814,6 +983,8 @@ func (lc *LeaderController) waitForPreviousWorkloads(ctx context.Context) error 
 
 			// Count pods that are being shut down
 			shutdownPods := 0
+			klog.Infof("Shutting down pods: %d [%s/%s]", len(pods.Items), workloadCheckInterval, maxWorkloadWaitTime)
+
 			for _, pod := range pods.Items {
 				if pod.Annotations != nil {
 					if _, ok := pod.Annotations[workloadShutdownAnnotation]; ok {
@@ -870,7 +1041,7 @@ func (lc *LeaderController) stopWorkloads() error {
 
 // monitorWorkloads monitors workload health and restarts any unhealthy workloads
 func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -889,7 +1060,7 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 			statuses := lc.workloadManager.GetAllStatuses()
 			for name, status := range statuses {
 				// Only attempt recovery for active workloads that are unhealthy
-				if status.Active && !status.Healthy {
+				if status.Active && lc.controllerState == common.StateNormal && !status.Healthy && status.LastError != "" {
 					klog.Warningf("Workload %s is unhealthy: %s", name, status.LastError)
 
 					// Don't restart pods that are just in Pending state
@@ -1112,4 +1283,83 @@ func (lc *LeaderController) canReuseExistingWorkloads(ctx context.Context) bool 
 
 	// If we get here, all workloads are running and can be reused
 	return true
+}
+
+// Enhanced isConnectionError function that works for both Redis and relational databases
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for specific error types
+	errStr := err.Error()
+
+	// Common connection errors for both Redis and relational databases
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no route to host") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "connection timed out") ||
+		strings.Contains(errStr, "dial tcp") {
+		return true
+	}
+
+	// Redis-specific connection errors
+	if strings.Contains(errStr, "redis: client is closed") ||
+		strings.Contains(errStr, "redis: connection pool timeout") ||
+		strings.Contains(errStr, "redis server: connection reset") ||
+		strings.Contains(errStr, "redis server: connection refused") ||
+		strings.Contains(errStr, "redis server: connection timed out") {
+		return true
+	}
+
+	// PostgreSQL-specific connection errors
+	if strings.Contains(errStr, "pq: server closed the connection") ||
+		strings.Contains(errStr, "failed to connect to") ||
+		strings.Contains(errStr, "database connection failed") ||
+		strings.Contains(errStr, "pq: SSL connection error") {
+		return true
+	}
+
+	// MySQL-specific connection errors
+	if strings.Contains(errStr, "Error 1040: Too many connections") ||
+		strings.Contains(errStr, "Error 2002: Can't connect") ||
+		strings.Contains(errStr, "Error 2003: Can't connect") ||
+		strings.Contains(errStr, "Error 2005: Unknown MySQL server host") ||
+		strings.Contains(errStr, "Error 2006: MySQL server has gone away") ||
+		strings.Contains(errStr, "Error 2013: Lost connection") {
+		return true
+	}
+
+	// SQLite-specific connection errors
+	if strings.Contains(errStr, "database is locked") ||
+		strings.Contains(errStr, "unable to open database file") {
+		return true
+	}
+
+	// Generic SQL connection errors that might be thrown by different drivers
+	if strings.Contains(errStr, "connection") && (strings.Contains(errStr, "lost") ||
+		strings.Contains(errStr, "closed") ||
+		strings.Contains(errStr, "failed") ||
+		strings.Contains(errStr, "dropped") ||
+		strings.Contains(errStr, "terminated") ||
+		strings.Contains(errStr, "error")) {
+		return true
+	}
+
+	// Handle wrapped errors
+	var redisErr redis.Error
+	if ierrors.As(err, &redisErr) && (strings.Contains(redisErr.Error(), "connection") ||
+		strings.Contains(redisErr.Error(), "timeout") ||
+		strings.Contains(redisErr.Error(), "refused")) {
+		return true
+	}
+
+	// Check for context deadline errors which often indicate connection issues
+	if ierrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	return false
 }

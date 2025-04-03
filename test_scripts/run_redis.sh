@@ -1,4 +1,4 @@
-#!/bin/bash -ex
+#!/bin/bash -e
 #sudo socat TCP-LISTEN:80,fork TCP:localhost:8080
 #kubectl config current-context
 #kubectl describe pod echo-process-2-pod -n default
@@ -6,7 +6,7 @@
 #kubectl get pod echo-process-2-pod -n default -o yaml | grep -A 10 resources
 
 #test_scripts/setup_config.sh
-
+#lsof -nP -iTCP:8080 | grep LISTEN
 CONFIG_FILE="/tmp/k8-highlander/config/config.yaml"
 CONTROLLER_ID=""
 TENANT="test-tenant"

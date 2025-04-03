@@ -1,4 +1,4 @@
-#!/bin/bash -ex
+#!/bin/bash -e
 #test_scripts/setup_config.sh
 
 CONFIG_FILE="/tmp/k8-highlander/config/config.yaml"

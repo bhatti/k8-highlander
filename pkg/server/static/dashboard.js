@@ -112,22 +112,84 @@ class StatefulDashboard {
         // Update leader status to show connection error
         const leaderContainer = document.getElementById('leader-status-content');
         if (leaderContainer) {
+            // Check if the content has controller state
+            const hasControllerState = leaderContainer.innerHTML.includes('Controller State');
+
             // Keep the existing content but add an error banner
             const errorBanner = document.createElement('div');
             errorBanner.className = 'alert alert-danger mt-2';
             errorBanner.innerHTML = `
-                <strong>Connection Error</strong>
-                <p>Unable to connect to server. Displaying last known state.</p>
-                <p>Last successful update: ${this.lastUpdateTime ? this.lastUpdateTime.toLocaleString() : 'Never'}</p>
-            `;
+            <strong>Connection Error</strong>
+            <p>Unable to connect to server. Displaying last known state.</p>
+            <p>Last successful update: ${this.lastUpdateTime ? this.lastUpdateTime.toLocaleString() : 'Never'}</p>
+        `;
 
             // Check if error banner already exists
             const existingBanner = leaderContainer.querySelector('.alert-danger');
             if (!existingBanner) {
                 leaderContainer.appendChild(errorBanner);
             }
+
+            // If the current view doesn't have controller state, update the indicator to show degraded
+            if (!hasControllerState) {
+                // Find the state indicator or add it if it doesn't exist
+                const stateRow = document.createElement('div');
+                stateRow.className = 'mb-2';
+                stateRow.innerHTML = `
+                <strong>Controller State:</strong>
+                <span class="status-indicator status-error"></span>
+                Unknown (Connection Error)
+            `;
+
+                // Insert after the first element (header)
+                const firstElement = leaderContainer.querySelector('.d-flex');
+                if (firstElement && firstElement.nextSibling) {
+                    leaderContainer.insertBefore(stateRow, firstElement.nextSibling);
+                } else {
+                    // Fallback to appending
+                    leaderContainer.appendChild(stateRow);
+                }
+            }
         }
 
+        // Update storage status to show connection error
+        const storageContainer = document.getElementById('storage-status-content');
+        if (storageContainer) {
+            // Check if the content has DB failure count
+            const hasFailureCount = storageContainer.innerHTML.includes('DB Failure Count');
+
+            const redisIndicator = storageContainer.querySelector('.status-indicator');
+            if (redisIndicator) {
+                redisIndicator.className = 'status-indicator status-error';
+                const textNode = redisIndicator.nextSibling;
+                if (textNode) {
+                    textNode.textContent = ' Unknown (Connection Error)';
+                }
+            }
+
+            // If the current view doesn't have DB failure count, add it
+            if (!hasFailureCount) {
+                // Create a failure count row
+                const failureRow = document.createElement('div');
+                failureRow.className = 'mb-2';
+                failureRow.innerHTML = `
+                <strong>DB Failure Count:</strong>
+                <span class="status-indicator status-error"></span>
+                Unknown (Connection Error)
+            `;
+
+                // Insert after the first element
+                const firstElement = storageContainer.querySelector('.mb-2');
+                if (firstElement && firstElement.nextSibling) {
+                    storageContainer.insertBefore(failureRow, firstElement.nextSibling);
+                } else {
+                    // Fallback to appending
+                    storageContainer.appendChild(failureRow);
+                }
+            }
+        }
+
+        // Rest of the original method...
         // Update cluster status to show connection error
         const clusterContainer = document.getElementById('cluster-status-content');
         if (clusterContainer) {
@@ -151,19 +213,6 @@ class StatefulDashboard {
                     }
                 }
             });
-        }
-
-        // Update storage status to show connection error
-        const storageContainer = document.getElementById('storage-status-content');
-        if (storageContainer) {
-            const redisIndicator = storageContainer.querySelector('.status-indicator');
-            if (redisIndicator) {
-                redisIndicator.className = 'status-indicator status-error';
-                const textNode = redisIndicator.nextSibling;
-                if (textNode) {
-                    textNode.textContent = ' Unknown (Connection Error)';
-                }
-            }
         }
 
         // Update workload statuses to show connection error
@@ -248,6 +297,11 @@ class StatefulDashboard {
         const statusClass = isLeader ? 'leader-card' : 'follower-card';
         const statusText = isLeader ? 'Leader' : 'Follower';
 
+        // Get controller state with fallback to Normal
+        const controllerState = status.controllerState || 'Normal';
+        // Determine state indicator class
+        const stateClass = controllerState === 'Normal' ? 'status-active' : 'status-warning';
+
         // Update card class
         const card = document.getElementById('leader-status-card');
         if (card) {
@@ -262,32 +316,37 @@ class StatefulDashboard {
 
         container.innerHTML = `
     <div class="d-flex align-items-center mb-3">
-    <div class="me-3">
-    <i class="fas ${isLeader ? 'fa-crown' : 'fa-user'} fa-2x"></i>
-</div>
-<div>
-    <h4 class="mb-0">${statusText}</h4>
-    <p class="text-muted mb-0">Instance ID: ${status.leaderID || 'Unknown'}</p>
-</div>
-</div>
-<div class="mb-2">
-    <strong>Current Leader:</strong> ${status.currentLeader || 'None'}
-</div>
-<div class="mb-2">
-    <strong>Last Leader:</strong> ${status.lastLeader || 'None'}
-</div>
-<div class="mb-2">
-    <strong>Leader Since:</strong> ${leaderSince}
-</div>
-<div class="mb-2">
-    <strong>Leadership Transitions:</strong> ${status.leadershipTransitions || 0}
-</div>
-<div class="mb-2">
-    <strong>Failover Count:</strong> ${status.failoverCount || 0}
-</div>
-<div>
-    <strong>Last Transition Reason:</strong> ${status.lastLeadershipChangeReason || 'N/A'}
-</div>
+        <div class="me-3">
+            <i class="fas ${isLeader ? 'fa-crown' : 'fa-user'} fa-2x"></i>
+        </div>
+        <div>
+            <h4 class="mb-0">${statusText}</h4>
+            <p class="text-muted mb-0">Instance ID: ${status.leaderID || 'Unknown'}</p>
+        </div>
+    </div>
+    <div class="mb-2">
+        <strong>Controller State:</strong>
+        <span class="status-indicator ${stateClass}"></span>
+        ${controllerState}
+    </div>
+    <div class="mb-2">
+        <strong>Current Leader:</strong> ${status.currentLeader || 'None'}
+    </div>
+    <div class="mb-2">
+        <strong>Last Leader:</strong> ${status.lastLeader || 'None'}
+    </div>
+    <div class="mb-2">
+        <strong>Leader Since:</strong> ${leaderSince}
+    </div>
+    <div class="mb-2">
+        <strong>Leadership Transitions:</strong> ${status.leadershipTransitions || 0}
+    </div>
+    <div class="mb-2">
+        <strong>Failover Count:</strong> ${status.failoverCount || 0}
+    </div>
+    <div>
+        <strong>Last Transition Reason:</strong> ${status.lastLeadershipChangeReason || 'N/A'}
+    </div>
     `;
     }
 
@@ -361,6 +420,12 @@ class StatefulDashboard {
         const storageType = dbInfo.type || status.storageType || 'redis';
         const isConnected = dbInfo.connected || status.dbConnected || false;
 
+        // Get DB failure count with fallback to 0
+        const dbFailureCount = status.dbFailureCount || 0;
+
+        // Determine failure count indicator class
+        const failureCountClass = dbFailureCount > 0 ? 'status-warning' : 'status-active';
+
         // Format storage type for display
         let storageTypeDisplay = 'Database';
         if (storageType === 'redis') {
@@ -374,34 +439,39 @@ class StatefulDashboard {
 
         // Build HTML
         let html = `
-<div class="mb-2">
-    <strong>${storageTypeDisplay} Connected:</strong>
-    <span class="status-indicator ${isConnected ? 'status-active' : 'status-inactive'}"></span>
-    ${isConnected ? 'Connected' : 'Disconnected'}
-</div>
-<div class="mb-2">
-    <strong>Address:</strong> ${address}
-</div>`;
+    <div class="mb-2">
+        <strong>${storageTypeDisplay} Connected:</strong>
+        <span class="status-indicator ${isConnected ? 'status-active' : 'status-inactive'}"></span>
+        ${isConnected ? 'Connected' : 'Disconnected'}
+    </div>
+    <div class="mb-2">
+        <strong>DB Failure Count:</strong>
+        <span class="status-indicator ${failureCountClass}"></span>
+        ${dbFailureCount}
+    </div>
+    <div class="mb-2">
+        <strong>Address:</strong> ${address}
+    </div>`;
 
         // Add any additional details
         if (dbInfo.details && Object.keys(dbInfo.details).length > 0) {
             for (const [key, value] of Object.entries(dbInfo.details)) {
                 if (key !== 'type') { // Skip type as we already displayed it
                     html += `
-<div class="mb-2">
-    <strong>${key.charAt(0).toUpperCase() + key.slice(1)}:</strong> ${value || 'N/A'}
-</div>`;
+    <div class="mb-2">
+        <strong>${key.charAt(0).toUpperCase() + key.slice(1)}:</strong> ${value || 'N/A'}
+    </div>`;
                 }
             }
         }
 
         html += `
-<div class="mb-2">
-    <strong>Last Error:</strong> ${status.lastError || 'None'}
-</div>
-<div>
-    <a href="/metrics" target="_blank" class="btn btn-sm btn-primary">View Metrics</a>
-</div>`;
+    <div class="mb-2">
+        <strong>Last Error:</strong> ${status.lastError || 'None'}
+    </div>
+    <div>
+        <a href="/metrics" target="_blank" class="btn btn-sm btn-primary">View Metrics</a>
+    </div>`;
 
         container.innerHTML = html;
     }

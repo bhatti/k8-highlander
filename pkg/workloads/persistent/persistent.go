@@ -425,7 +425,7 @@ func (s *PersistentWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				s.updateStatus(func(status *common.WorkloadStatus) {
-					status.Healthy = s.monitoringServer.GetHealthStatus().IsLeader
+					status.Healthy = s.monitoringServer.IsLeaderAndNormal()
 					status.LastError = ""
 				})
 			}

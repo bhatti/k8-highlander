@@ -373,7 +373,7 @@ func (c *CronJobWorkload) createOrUpdateCronJob(ctx context.Context, suspend boo
 
 // monitorHealth monitors the health of the cron job
 func (c *CronJobWorkload) monitorHealth(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -392,7 +392,7 @@ func (c *CronJobWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				c.updateStatus(func(s *common.WorkloadStatus) {
-					s.Healthy = c.monitoringServer.GetHealthStatus().IsLeader
+					s.Healthy = c.monitoringServer.IsLeaderAndNormal()
 					s.LastError = ""
 				})
 			}
@@ -424,7 +424,7 @@ func (c *CronJobWorkload) checkHealth(ctx context.Context) error {
 		s.Details["lastScheduleTime"] = cronJob.Status.LastScheduleTime
 		s.Details["activeJobs"] = len(cronJob.Status.Active)
 		s.Active = !*cronJob.Spec.Suspend
-		s.Healthy = c.monitoringServer.GetHealthStatus().IsLeader
+		s.Healthy = c.monitoringServer.IsLeaderAndNormal()
 
 		// Check if there are any active jobs
 		if len(cronJob.Status.Active) > 0 {
@@ -505,7 +505,7 @@ func (c *CronJobWorkload) updateStatus(updateFn func(*common.WorkloadStatus)) {
 
 // MonitorCronJob TODO
 func (c *CronJobWorkload) MonitorCronJob(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {

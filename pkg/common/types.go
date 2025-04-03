@@ -42,9 +42,11 @@
 package common
 
 import (
+	"context"
 	"fmt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"time"
 )
 
 // SevereError represents a severe error initializing such as bad file/format
@@ -251,7 +253,42 @@ func AddSecretVolumes(podSpec *corev1.PodSpec, container *corev1.Container, secr
 }
 
 type LocalLeaderInfo struct {
-	IsLeader    bool   `json:"isLeader"`
-	LeaderID    string `json:"leaderID"`
-	ClusterName string `json:"clusterName"`
+	IsLeader    bool            `json:"isLeader"`
+	LeaderID    string          `json:"leaderID"`
+	LeaderState ControllerState `json:"leaderState"`
+	ClusterName string          `json:"clusterName"`
 }
+
+// contextKey is a type to avoid key collisions in context
+type contextKey string
+
+const startTimeKey contextKey = "startTime"
+
+// StoreStartTime stores the current time in a new context and returns it
+func StoreStartTime(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(startTimeKey).(time.Time); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, startTimeKey, time.Now())
+}
+
+// GetElapsedTime retrieves the elapsed time from the context
+func GetElapsedTime(ctx context.Context) *time.Duration {
+	startTime, ok := ctx.Value(startTimeKey).(time.Time)
+	if !ok {
+		return nil
+	}
+	elapsed := time.Since(startTime)
+	return &elapsed
+}
+
+// ControllerState represents the current state of the controller
+type ControllerState string
+
+const (
+	// StateNormal indicates the controller is operating normally
+	StateNormal ControllerState = "Normal"
+
+	// StateDegraded indicates the controller is experiencing issues but still functioning
+	StateDegraded ControllerState = "Degraded"
+)

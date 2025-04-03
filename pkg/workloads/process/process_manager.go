@@ -139,7 +139,7 @@ func (m *ProcessManager) GetStatus() common.WorkloadStatus {
 		processStatuses[name] = processStatus
 
 		// If any process is unhealthy, the manager is unhealthy
-		if !processStatus.Healthy {
+		if !processStatus.Healthy && processStatus.LastError != "" {
 			status.Healthy = false
 			status.LastError = fmt.Sprintf("Process %s is unhealthy: %s", name, processStatus.LastError)
 		}

@@ -363,7 +363,7 @@ func (d *ServiceWorkload) scaleDeployment(ctx context.Context, replicas int32) e
 
 // monitorHealth monitors the health of the deployment
 func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -382,7 +382,7 @@ func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
 				})
 			} else {
 				d.updateStatus(func(s *common.WorkloadStatus) {
-					s.Healthy = d.monitoringServer.GetHealthStatus().IsLeader
+					s.Healthy = d.monitoringServer.IsLeaderAndNormal()
 					s.LastError = ""
 				})
 			}
@@ -525,7 +525,7 @@ func (d *ServiceWorkload) updateStatus(updateFn func(*common.WorkloadStatus)) {
 
 // MonitorDeployment TODO
 func (d *ServiceWorkload) MonitorDeployment(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {

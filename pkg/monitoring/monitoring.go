@@ -103,6 +103,7 @@ type ControllerMetrics struct {
 	ServiceStatus    *prometheus.GaugeVec
 	PersistentStatus *prometheus.GaugeVec
 	CronJobStatus    *prometheus.GaugeVec
+	ControllerStatus *prometheus.GaugeVec
 
 	WorkloadRetryAttempts *prometheus.CounterVec
 	WorkloadRetrySuccess  *prometheus.CounterVec
@@ -110,15 +111,16 @@ type ControllerMetrics struct {
 
 // HealthStatus represents the health status of the controller
 type HealthStatus struct {
-	IsLeader             bool          `json:"isLeader"`
-	LeaderSince          time.Time     `json:"leaderSince,omitempty"`
-	LastLeaderTransition time.Time     `json:"lastLeaderTransition"`
-	Uptime               time.Duration `json:"uptime"`
-	LeaderID             string        `json:"leaderID"`
-	ClusterName          string        `json:"clusterName"`
-	ClusterHealth        bool          `json:"clusterHealth"`
-	DBConnected          bool          `json:"dbConnected"`
-	StorageType          string        `json:"storageType"`
+	IsLeader             bool                   `json:"isLeader"`
+	LeaderSince          time.Time              `json:"leaderSince,omitempty"`
+	LastLeaderTransition time.Time              `json:"lastLeaderTransition"`
+	Uptime               time.Duration          `json:"uptime"`
+	LeaderID             string                 `json:"leaderID"`
+	ClusterName          string                 `json:"clusterName"`
+	ClusterHealth        bool                   `json:"clusterHealth"`
+	DBConnected          bool                   `json:"dbConnected"`
+	StorageType          string                 `json:"storageType"`
+	ControllerState      common.ControllerState `json:"controllerState"`
 
 	WorkloadStatus        map[string]interface{} `json:"workloadStatus"`
 	ReadyForTraffic       bool                   `json:"readyForTraffic"`
@@ -131,6 +133,7 @@ type HealthStatus struct {
 	CurrentLeader              string `json:"currentLeader"`
 	LastLeader                 string `json:"lastLeader"`
 	LastLeadershipChangeReason string `json:"lastLeadershipChangeReason"`
+	DBFailureCount             int    `json:"dbFailureCount"`
 }
 
 // MonitoringServer provides monitoring and health endpoints
@@ -294,6 +297,10 @@ func NewControllerMetrics(reg prometheus.Registerer) *ControllerMetrics {
 			Name: "k8_highlander_workload_retry_success_total",
 			Help: "Total number of successful retry attempts for workloads",
 		}, []string{"type", "name"}),
+		ControllerStatus: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "k8_highlander_controller_state",
+			Help: "State of the controller (1=Normal, 0=Degraded)",
+		}, []string{"state"}),
 	}
 
 	// Register all metrics with Prometheus
@@ -329,6 +336,7 @@ func NewControllerMetrics(reg prometheus.Registerer) *ControllerMetrics {
 		metrics.PersistentStatus,
 		metrics.WorkloadRetryAttempts,
 		metrics.WorkloadRetrySuccess,
+		metrics.ControllerStatus,
 	)
 
 	return metrics
@@ -366,6 +374,29 @@ func (m *MonitoringServer) Start(ctx context.Context) error {
 func (m *MonitoringServer) Stop(_ context.Context) error {
 	close(m.stopCh)
 	return nil
+}
+
+func (m *MonitoringServer) UpdateControllerState(state common.ControllerState) {
+	// Update health status
+	m.statusMutex.Lock()
+	defer m.statusMutex.Unlock()
+
+	// Only log if state is changing
+	if m.healthStatus.ControllerState != state {
+		klog.Infof("Controller state changed from %s to %s",
+			m.healthStatus.ControllerState, state)
+	}
+
+	m.healthStatus.ControllerState = state
+
+	// Update metrics
+	if state == "Normal" {
+		m.metrics.ControllerStatus.WithLabelValues("normal").Set(1)
+		m.metrics.ControllerStatus.WithLabelValues("degraded").Set(0)
+	} else if state == "Degraded" {
+		m.metrics.ControllerStatus.WithLabelValues("normal").Set(0)
+		m.metrics.ControllerStatus.WithLabelValues("degraded").Set(1)
+	}
 }
 
 // GetHealthStatus returns a copy of the current health status
@@ -461,12 +492,17 @@ func (m *ControllerMetrics) RecordDBOperation(operation string, duration time.Du
 	}
 }
 
+func (m *MonitoringServer) IsLeaderAndNormal() bool {
+	return m.healthStatus.IsLeader && m.healthStatus.ControllerState == common.StateNormal
+}
+
 func (m *MonitoringServer) GetLeaderInfo() common.LocalLeaderInfo {
 	m.statusMutex.RLock()
 	defer m.statusMutex.RUnlock()
 	return common.LocalLeaderInfo{
-		IsLeader:    m.healthStatus.IsLeader,
+		IsLeader:    m.healthStatus.IsLeader && m.healthStatus.ControllerState == common.StateNormal,
 		LeaderID:    m.healthStatus.LeaderID,
+		LeaderState: m.healthStatus.ControllerState,
 		ClusterName: m.healthStatus.ClusterName,
 	}
 }
@@ -519,14 +555,18 @@ func (m *MonitoringServer) UpdateLeaderStatus(isLeader bool, leaderID string, cl
 
 	// Determine if we're ready for traffic
 	// We're ready if:
-	// 1. We're the leader and have been for at least 5 seconds, or
+	// 1. We're the leader and have been for at least 5 seconds and in Normal state, or
 	// 2. We're not the leader but the last transition was more than 30 seconds ago
 	if isLeader {
 		// If we just became leader, we need a grace period
 		if wasLeader != isLeader {
 			m.healthStatus.ReadyForTraffic = false
-		} else if time.Since(m.healthStatus.LeaderSince) > 5*time.Second {
+		} else if time.Since(m.healthStatus.LeaderSince) > 5*time.Second &&
+			m.healthStatus.ControllerState == common.StateNormal {
 			m.healthStatus.ReadyForTraffic = true
+		} else if m.healthStatus.ControllerState == common.StateDegraded {
+			// In degraded state, we're still ready but with reduced confidence
+			m.healthStatus.ReadyForTraffic = time.Since(m.healthStatus.LeaderSince) > 10*time.Second
 		}
 	} else {
 		// If we're not the leader, we're only ready after a stabilization period
@@ -553,7 +593,7 @@ func (m *MonitoringServer) UpdateClusterHealth(clusterName string, isHealthy boo
 }
 
 // UpdateDBStatus updates the DB connection status
-func (m *MonitoringServer) UpdateDBStatus(isConnected bool, lockTTL float64) {
+func (m *MonitoringServer) UpdateDBStatus(isConnected bool, lockTTL float64, failureCount int) {
 	// Update metrics
 	m.metrics.DBLockTTL.Set(lockTTL)
 
@@ -562,6 +602,7 @@ func (m *MonitoringServer) UpdateDBStatus(isConnected bool, lockTTL float64) {
 	defer m.statusMutex.Unlock()
 
 	m.healthStatus.DBConnected = isConnected
+	m.healthStatus.DBFailureCount = failureCount
 }
 
 // RecordDBOperation records a db operation
