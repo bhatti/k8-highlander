@@ -170,7 +170,7 @@ func (f *WorkloadFactory) loadWorkloadFile(configFile string, manager Manager) e
 			continue
 		}
 
-		if err := manager.AddWorkload(config.Name, workload); err != nil {
+		if err := manager.AddWorkload(workload); err != nil {
 			klog.Errorf("Failed to add workload %s: %v", config.Name, err)
 			continue
 		}

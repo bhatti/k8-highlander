@@ -63,6 +63,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"math"
 	"reflect"
 	"strings"
 	"sync"
@@ -828,7 +829,7 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 		case <-ticker.C:
 			lc.workloadMutex.Lock()
 
-			if lc.isLeader {
+			if lc.IsLeader() {
 				// If we're the leader, try to renew
 				if !lc.RenewLeadership(ctx) {
 					klog.Infof("Leadership lost during renewal [elapsed: %s]",
@@ -1044,6 +1045,10 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	// Keep track of restart attempts to implement exponential backoff
+	restartAttempts := make(map[string]int)
+	lastRestartTime := make(map[string]time.Time)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1068,16 +1073,31 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 						klog.V(4).Infof("Workload %s is in Pending state, not restarting", name)
 						continue
 					}
-					// Don't restart workload that were just started
+
+					// Don't restart workloads that were just started
 					if status.LastTransition.Add(2 * time.Minute).After(time.Now()) {
 						klog.V(4).Infof("Workload %s was recently started, not restarting yet", name)
+						continue
+					}
+
+					// Implement exponential backoff for restarts
+					attempts := restartAttempts[name]
+					lastRestart, hasRestarted := lastRestartTime[name]
+
+					// Calculate backoff delay based on attempts (with a maximum)
+					backoffDelay := time.Duration(math.Min(float64(60), math.Pow(2, float64(attempts)))) * time.Second
+
+					// Check if we need to wait longer before retrying
+					if hasRestarted && time.Since(lastRestart) < backoffDelay {
+						klog.V(4).Infof("Workload %s is in backoff period (%v), not restarting yet",
+							name, backoffDelay)
 						continue
 					}
 
 					// Try to recover the workload
 					workload, exists := lc.workloadManager.GetWorkload(name)
 					if exists {
-						klog.Infof("Attempting to recover workload %s", name)
+						klog.Infof("Attempting to recover workload %s (attempt %d)", name, attempts+1)
 
 						// Stop and restart the workload
 						if err := workload.Stop(ctx); err != nil {
@@ -1087,6 +1107,17 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 						if err := workload.Start(ctx, lc.GetClient()); err != nil {
 							klog.Errorf("Failed to restart workload %s: %v", name, err)
 						}
+
+						// Update restart tracking
+						restartAttempts[name] = attempts + 1
+						lastRestartTime[name] = time.Now()
+					}
+				} else if status.Healthy {
+					// Reset restart attempts when workload becomes healthy
+					if _, exists := restartAttempts[name]; exists {
+						klog.Infof("Workload %s is now healthy, resetting restart counter", name)
+						delete(restartAttempts, name)
+						delete(lastRestartTime, name)
 					}
 				}
 			}

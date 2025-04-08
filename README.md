@@ -377,6 +377,88 @@ spec:
         # ... other configuration ...
 ```
 
+
+
+# k8-highlander CRD Integration Guide
+
+You can use the Custom Resource Definition (CRD) support in k8-highlander to manage workload configurations as well. This approach allows you to define workload configurations using Kubernetes native resources and reference them from your k8-highlander configuration.
+
+## Step 1: Install the CRDs
+
+First, apply the CRD definitions to your Kubernetes cluster:
+
+```bash
+kubectl apply -f config/highlander-crds.yaml
+```
+
+## Step 2: Create Workload Resources
+
+Create some Custom Resources for your workloads similar to sample file:
+
+```bash
+kubectl apply -f config/sample-workload-resources.yaml
+```
+
+## Step 3: Reference CRDs in Your Configuration
+
+Update your k8-highlander configuration to reference the Custom Resources:
+
+```yaml
+workloads:
+  processes:
+    - name: "process-name"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadProcess"
+        name: "singleton-process"
+        namespace: "default"
+```
+
+## Step 4: Start k8-highlander with CRD Support
+
+Start k8-highlander with the CRD support enabled:
+
+```bash
+k8-highlander --config=config.yaml
+```
+
+## Step 5: Check the status:
+
+```bash
+kubectl get workloadprocesses
+```
+
+You'll see the status reflecting the current state of the workload:
+
+```
+NAME               ACTIVE   HEALTHY   AGE
+singleton-process  true     true      5m
+```
+
+## Troubleshooting
+
+If you encounter issues with the CRD integration, check the following:
+
+1. **CRDs are installed**: Verify that the CRDs are properly installed in your cluster.
+   ```bash
+   kubectl get crd | grep highlander
+   ```
+
+2. **Custom Resources exist**: Make sure the Custom Resources exist in the expected namespace.
+   ```bash
+   kubectl get workloadprocesses -n your-namespace
+   ```
+
+3. **CRD references are correct**: Check that the references in your configuration match the actual Custom Resources.
+
+4. **k8-highlander logs**: Check the k8-highlander logs for any errors related to CRD loading.
+   ```bash
+   kubectl logs -n your-namespace deployment/k8-highlander
+   ```
+
+5. **Permissions**: Ensure that k8-highlander has the necessary permissions to read and update the Custom Resources.
+
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

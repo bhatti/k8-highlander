@@ -81,10 +81,7 @@ import (
 // Returns an error if any component fails to initialize or start.
 func runController() error {
 	// Initialize clusters
-	cluster, err := initializeCluster(&appConfig)
-	if err != nil {
-		return err
-	}
+	cluster := &appConfig.Cluster
 
 	// Create a context that can be canceled
 	ctx, cancel := context.WithCancel(context.Background())
@@ -150,28 +147,6 @@ func runController() error {
 	return nil
 }
 
-// initializeCluster creates and configures a Kubernetes cluster client based on the
-// provided application configuration.
-//
-// Parameters:
-//   - cfg: Application configuration containing cluster settings
-//
-// Returns:
-//   - *common.ClusterConfig: Configured cluster object with initialized Kubernetes client
-//   - error: Error if client creation fails
-func initializeCluster(cfg *common.AppConfig) (*common.ClusterConfig, error) {
-	var cluster = cfg.Cluster
-
-	// Initialize client for the cluster
-	clientset, err := common.CreateKubernetesClient(cluster.Kubeconfig)
-	if err != nil {
-		return nil, err
-	}
-
-	cluster.SetClient(clientset)
-	return &cluster, nil
-}
-
 // initializeWorkloadManagers creates and configures all workload managers for
 // different types of workloads (processes, cron jobs, services, persistent sets).
 // It registers each manager with the main workload manager.
@@ -200,7 +175,7 @@ func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *
 			klog.Infof("Added process %s", processConfig.Name)
 		}
 	}
-	if err := manager.AddWorkload("processes", processManager); err != nil {
+	if err := manager.AddWorkload(processManager); err != nil {
 		return nil, err
 	}
 
@@ -213,7 +188,7 @@ func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *
 			klog.Infof("Added cron job %s", cronJobConfig.Name)
 		}
 	}
-	if err := manager.AddWorkload("cronjobs", cronJobManager); err != nil {
+	if err := manager.AddWorkload(cronJobManager); err != nil {
 		return nil, err
 	}
 
@@ -226,7 +201,7 @@ func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *
 			klog.Infof("Added deployment %s", deploymentConfig.Name)
 		}
 	}
-	if err := manager.AddWorkload("service", deploymentManager); err != nil {
+	if err := manager.AddWorkload(deploymentManager); err != nil {
 		return nil, err
 	}
 
@@ -239,7 +214,7 @@ func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *
 			klog.Infof("Added persistent set %s", statefulSetConfig.Name)
 		}
 	}
-	if err := manager.AddWorkload("persistent", statefulSetManager); err != nil {
+	if err := manager.AddWorkload(statefulSetManager); err != nil {
 		return nil, err
 	}
 

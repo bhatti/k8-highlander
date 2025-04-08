@@ -71,7 +71,7 @@ type Manager interface {
 	StopAll(ctx context.Context) error
 
 	// AddWorkload adds a workload to the manager
-	AddWorkload(name string, workload common.Workload) error
+	AddWorkload(workload common.Workload) error
 
 	// RemoveWorkload removes a workload from the manager
 	RemoveWorkload(name string) error
@@ -280,12 +280,12 @@ func (m *ManagerImpl) Cleanup() {
 }
 
 // AddWorkload adds a workload to the manager
-func (m *ManagerImpl) AddWorkload(name string, workload common.Workload) error {
+func (m *ManagerImpl) AddWorkload(workload common.Workload) error {
 	m.workloadMutex.Lock()
 	defer m.workloadMutex.Unlock()
 
-	if _, exists := m.workloads[name]; exists {
-		return fmt.Errorf("workload %s already exists", name)
+	if _, exists := m.workloads[workload.GetName()]; exists {
+		return fmt.Errorf("workload %s already exists", workload.GetName())
 	}
 
 	// If the workload supports metrics, set them
@@ -295,7 +295,7 @@ func (m *ManagerImpl) AddWorkload(name string, workload common.Workload) error {
 		monitoringSetter.SetMonitoring(m.metrics, m.monitoringServer)
 	}
 
-	m.workloads[name] = workload
+	m.workloads[workload.GetName()] = workload
 	return nil
 }
 

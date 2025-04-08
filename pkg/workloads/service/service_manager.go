@@ -22,7 +22,7 @@
 
 // Package service provides management for service-based workloads in k8-highlander.
 //
-// This file implements the DeploymentManager, which coordinates multiple Service
+// This file implements the ServiceManager, which coordinates multiple Service
 // workloads as a cohesive group. It handles the lifecycle of Kubernetes Deployments
 // used for long-running services, providing unified management, configuration loading,
 // and status reporting.
@@ -34,7 +34,7 @@
 // - Aggregated status reporting for monitoring and dashboards
 // - Thread-safe operations for concurrent access
 //
-// The DeploymentManager serves as the bridge between the workload manager and
+// The ServiceManager serves as the bridge between the workload manager and
 // individual Service workloads, ensuring consistent management across all services
 // and proper integration with the leader election system.
 
@@ -54,10 +54,10 @@ import (
 	"time"
 )
 
-// DeploymentManager manages multiple deployment workloads as a single logical unit.
+// ServiceManager manages multiple deployment workloads as a single logical unit.
 // It provides coordinated lifecycle management and status aggregation for all
 // Deployment-based services under its control.
-type DeploymentManager struct {
+type ServiceManager struct {
 	namespace        string
 	deployments      map[string]*ServiceWorkload
 	deploymentMutex  sync.RWMutex
@@ -71,15 +71,15 @@ type DeploymentManager struct {
 
 // NewDeploymentManager creates a new deployment manager
 func NewDeploymentManager(namespace, configDir string, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) *DeploymentManager {
-	return &DeploymentManager{
+	monitoringServer *monitoring.MonitoringServer) *ServiceManager {
+	return &ServiceManager{
 		namespace:        namespace,
 		deployments:      make(map[string]*ServiceWorkload),
 		configDir:        configDir,
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
 		status: common.WorkloadStatus{
-			Name:    "deployments",
+			Name:    "service",
 			Type:    common.WorkloadTypeCustom,
 			Active:  false,
 			Healthy: true,
@@ -91,12 +91,12 @@ func NewDeploymentManager(namespace, configDir string, metrics *monitoring.Contr
 // Start initializes the manager and starts all registered Deployment workloads.
 // It first loads configurations from files if a config directory was provided,
 // then starts each workload with the given Kubernetes client.
-func (m *DeploymentManager) Start(ctx context.Context, client kubernetes.Interface) error {
+func (m *ServiceManager) Start(ctx context.Context, client kubernetes.Interface) error {
 	m.client = client
 
 	// Load deployment configurations
 	if err := m.loadDeploymentConfigs(); err != nil {
-		return common.NewSevereError("DeploymentManager", "failed to load deployment configs", err)
+		return common.NewSevereError("ServiceManager", "failed to load deployment configs", err)
 	}
 
 	// Start all deployments
@@ -120,7 +120,7 @@ func (m *DeploymentManager) Start(ctx context.Context, client kubernetes.Interfa
 
 // Stop gracefully terminates all managed Deployment workloads, ensuring proper
 // cleanup of resources.
-func (m *DeploymentManager) Stop(ctx context.Context) error {
+func (m *ServiceManager) Stop(ctx context.Context) error {
 	m.deploymentMutex.RLock()
 	defer m.deploymentMutex.RUnlock()
 
@@ -140,7 +140,7 @@ func (m *DeploymentManager) Stop(ctx context.Context) error {
 }
 
 // GetStatus returns the status of the deployment manager
-func (m *DeploymentManager) GetStatus() common.WorkloadStatus {
+func (m *ServiceManager) GetStatus() common.WorkloadStatus {
 	m.statusMutex.RLock()
 	defer m.statusMutex.RUnlock()
 
@@ -157,32 +157,32 @@ func (m *DeploymentManager) GetStatus() common.WorkloadStatus {
 		deploymentStatuses[name] = deployment.GetStatus()
 	}
 
-	status.Details["deployments"] = deploymentStatuses
+	status.Details["service"] = deploymentStatuses
 
 	return status
 }
 
 // GetName returns the name of the workload
-func (m *DeploymentManager) GetName() string {
-	return "deployments"
+func (m *ServiceManager) GetName() string {
+	return "service"
 }
 
 // GetType returns the type of the workload
-func (m *DeploymentManager) GetType() common.WorkloadType {
+func (m *ServiceManager) GetType() common.WorkloadType {
 	return common.WorkloadTypeCustom
 }
 
 // loadDeploymentConfigs loads deployment configurations from files
-func (m *DeploymentManager) loadDeploymentConfigs() error {
+func (m *ServiceManager) loadDeploymentConfigs() error {
 	// Find all deployment config files
-	yamlFiles, err := filepath.Glob(filepath.Join(m.configDir, "deployment-*.yaml"))
+	yamlFiles, err := filepath.Glob(filepath.Join(m.configDir, "service-*.yaml"))
 	if err != nil {
-		return common.NewSevereError("DeploymentManager", "failed to find deployment yaml config files", err)
+		return common.NewSevereError("ServiceManager", "failed to find service-deployment yaml config files", err)
 	}
 
-	ymlFiles, err := filepath.Glob(filepath.Join(m.configDir, "deployment-*.yml"))
+	ymlFiles, err := filepath.Glob(filepath.Join(m.configDir, "service-*.yml"))
 	if err != nil {
-		return common.NewSevereError("DeploymentManager", "failed to find deployment yml config files", err)
+		return common.NewSevereError("ServiceManager", "failed to find service-deployment yml config files", err)
 	}
 
 	// Combine file lists
@@ -200,11 +200,11 @@ func (m *DeploymentManager) loadDeploymentConfigs() error {
 }
 
 // loadDeploymentConfigFile loads deployment configurations from a single file
-func (m *DeploymentManager) loadDeploymentConfigFile(configFile string) error {
+func (m *ServiceManager) loadDeploymentConfigFile(configFile string) error {
 	// Read the file
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		return common.NewSevereError("DeploymentManager", fmt.Sprintf("failed to read config file: %s", configFile), err)
+		return common.NewSevereError("ServiceManager", fmt.Sprintf("failed to read config file: %s", configFile), err)
 	}
 
 	// Parse the YAML
@@ -214,7 +214,7 @@ func (m *DeploymentManager) loadDeploymentConfigFile(configFile string) error {
 		var singleConfig common.ServiceConfig
 		if err := yaml.Unmarshal(data, &singleConfig); err != nil {
 			klog.Infof("Failed Config File: %s\n", data)
-			return common.NewSevereError("DeploymentManager", fmt.Sprintf("failed to parse deployment config file: %s", configFile), err)
+			return common.NewSevereError("ServiceManager", fmt.Sprintf("failed to parse deployment config file: %s", configFile), err)
 		}
 		deploymentConfigs = []common.ServiceConfig{singleConfig}
 	}
@@ -243,15 +243,15 @@ func (m *DeploymentManager) loadDeploymentConfigFile(configFile string) error {
 }
 
 // AddDeployment adds a deployment to the manager
-func (m *DeploymentManager) AddDeployment(config common.ServiceConfig) error {
+func (m *ServiceManager) AddDeployment(config common.ServiceConfig) error {
 	if err := config.Validate(""); err != nil {
-		return common.NewSevereError("DeploymentManager", "invalid deployment configuration", common.ValidationErrors(err))
+		return common.NewSevereError("ServiceManager", "invalid deployment configuration", common.ValidationErrors(err))
 	}
 	m.deploymentMutex.Lock()
 	defer m.deploymentMutex.Unlock()
 
 	if _, exists := m.deployments[config.Name]; exists {
-		return fmt.Errorf("deployment %s already exists", config.Name)
+		return fmt.Errorf("service-deployment %s already exists", config.Name)
 	}
 
 	// Set namespace if not specified
@@ -277,13 +277,13 @@ func (m *DeploymentManager) AddDeployment(config common.ServiceConfig) error {
 }
 
 // RemoveDeployment removes a deployment from the manager
-func (m *DeploymentManager) RemoveDeployment(name string) error {
+func (m *ServiceManager) RemoveDeployment(name string) error {
 	m.deploymentMutex.Lock()
 	defer m.deploymentMutex.Unlock()
 
 	deployment, exists := m.deployments[name]
 	if !exists {
-		return fmt.Errorf("deployment %s does not exist", name)
+		return fmt.Errorf("service-deployment %s does not exist", name)
 	}
 
 	// Stop the deployment if client is available
@@ -298,7 +298,7 @@ func (m *DeploymentManager) RemoveDeployment(name string) error {
 }
 
 // updateStatus updates the workload status
-func (m *DeploymentManager) updateStatus(updateFn func(*common.WorkloadStatus)) {
+func (m *ServiceManager) updateStatus(updateFn func(*common.WorkloadStatus)) {
 	m.statusMutex.Lock()
 	defer m.statusMutex.Unlock()
 	updateFn(&m.status)

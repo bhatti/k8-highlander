@@ -60,6 +60,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/klog/v2"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +76,7 @@ type ProcessWorkload struct {
 	status           common.WorkloadStatus
 	statusMutex      sync.RWMutex
 	stopCh           chan struct{}
+	stopped          bool
 	client           kubernetes.Interface
 	namespace        string
 	podName          string
@@ -161,7 +164,7 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 
 	// Use a mutex to safely close the channel only once
 	p.statusMutex.Lock()
-	if p.stopCh != nil {
+	if p.stopCh != nil && !p.stopped {
 		// Check if channel is already closed by trying to read from it
 		select {
 		case <-p.stopCh:
@@ -171,8 +174,8 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 		default:
 			// Channel is still open, close it
 			close(p.stopCh)
-			p.stopCh = nil
 		}
+		p.stopped = true
 	}
 	p.statusMutex.Unlock()
 
@@ -338,13 +341,16 @@ func (p *ProcessWorkload) watchPodTerminations(ctx context.Context) {
 				}
 
 				if !controlledShutdown {
-					klog.Warningf("Pod %s was deleted unexpectedly, recreating", p.podName)
+					klog.Warningf("Pod %s was deleted unexpectedly, recreating %s in namespace %s [%v]", p.podName,
+						p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
 					// Recreate the pod
 					if err := p.createOrUpdatePod(ctx); err != nil {
 						klog.Errorf("Failed to recreate pod %s: %v", p.podName, err)
 					}
 				} else {
-					klog.Infof("Pod %s was deleted as part of controlled shutdown", p.podName)
+					debug.PrintStack()
+					klog.Infof("Pod %s was deleted as part of controlled shutdown %s in namespace %s [%v]", p.podName,
+						p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
 				}
 			}
 		}
@@ -371,7 +377,8 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 
 	if errors.IsNotFound(err) {
 		// Create new pod
-		klog.Infof("Pod %s does not exist, creating it", p.podName)
+		klog.Infof("Pod %s does not exist, creating it %s in namespace %s [%v]", p.podName,
+			p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
 
 		_, err = p.client.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
 		if err != nil {
@@ -413,6 +420,85 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+// checkHealth checks the health of the pod with retries
+func (p *ProcessWorkload) checkHealth(ctx context.Context) error {
+	// Define the actual health check function that will be retried
+	checkFn := func() (bool, string, error) {
+		pod, err := p.client.CoreV1().Pods(p.namespace).Get(ctx, p.podName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				// Only consider a missing pod an error if it's been missing for some time
+				p.statusMutex.RLock()
+				lastTransition := p.status.LastTransition
+				p.statusMutex.RUnlock()
+
+				if time.Since(lastTransition) < 30*time.Second {
+					// Pod might still be creating or in transition, don't mark as error yet
+					return false, "Pod not found, but within grace period", nil
+				}
+
+				return false, fmt.Sprintf("Pod not found: %v", err), err
+			}
+			return false, fmt.Sprintf("Error getting pod: %v", err), err
+		}
+
+		// Check if pod is running and ready
+		if pod.Status.Phase == corev1.PodRunning {
+			// Check if all containers are ready
+			allReady := true
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if !containerStatus.Ready {
+					allReady = false
+					break
+				}
+			}
+
+			if allReady {
+				return true, "", nil
+			} else {
+				return false, "Not all containers are ready", nil
+			}
+		} else if pod.Status.Phase == corev1.PodSucceeded {
+			// For jobs that complete successfully
+			return true, "", nil
+		} else if pod.Status.Phase == corev1.PodFailed {
+			// For pods that failed, get container error info
+			errorMsg := "Pod failed"
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
+					errorMsg = fmt.Sprintf("Container %s terminated with exit code %d: %s",
+						containerStatus.Name,
+						containerStatus.State.Terminated.ExitCode,
+						containerStatus.State.Terminated.Message)
+					break
+				}
+			}
+			return false, errorMsg, fmt.Errorf(errorMsg)
+		} else if pod.Status.Phase == corev1.PodPending {
+			// Check if pod is still being created (give it more time)
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse {
+					return false, fmt.Sprintf("Pod in Pending state: %s", condition.Reason), nil
+				}
+			}
+			return false, fmt.Sprintf("Pod in Pending state"), nil
+		}
+
+		return false, fmt.Sprintf("Pod in %s state", pod.Status.Phase), nil
+	}
+
+	// Perform the health check with retries
+	healthy, errMsg, err := common.RetryHealthCheck(ctx, 5, 1*time.Second, checkFn)
+
+	// Update status based on health check results
+	p.updateStatus(func(s *common.WorkloadStatus) {
+		s.Healthy = healthy && p.monitoringServer.IsLeaderAndNormal()
+		s.LastError = errMsg
+	})
+
+	return err
 }
 
 // buildPod builds a Kubernetes Pod for the process
@@ -467,6 +553,7 @@ func (p *ProcessWorkload) buildPod() (*corev1.Pod, error) {
 func (p *ProcessWorkload) periodicStatusUpdater(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -474,96 +561,65 @@ func (p *ProcessWorkload) periodicStatusUpdater(ctx context.Context) {
 		case <-p.stopCh:
 			return
 		case <-ticker.C:
-			pod, err := p.client.CoreV1().Pods(p.namespace).Get(ctx, p.podName, metav1.GetOptions{})
-			if err != nil {
-				if !errors.IsNotFound(err) {
-					klog.Errorf("Failed to get pod %s: %v", p.podName, err)
-				}
+			// Use the checkHealth function to check the pod health with retries
+			if err := p.checkHealth(ctx); err != nil {
+				klog.Warningf("Pod health check failed for %s: %v", p.podName, err)
 
-				p.updateStatus(func(s *common.WorkloadStatus) {
-					s.Active = false
-					s.Healthy = false
-					s.LastError = fmt.Sprintf("Pod not found: %v", err)
-				})
-
-				// Try to recreate the pod
-				// Only recreate if we're still supposed to be running
+				// Try to recreate the pod if it's missing and should be active
 				p.statusMutex.RLock()
 				active := p.status.Active
 				p.statusMutex.RUnlock()
-				if active {
-					klog.Warningf("Pod %s not found, it should be recreated", p.podName)
+
+				if active && errors.IsNotFound(err) {
+					klog.Warningf("Pod %s not found, attempting to recreate", p.podName)
+					if createErr := p.createOrUpdatePod(ctx); createErr != nil {
+						klog.Errorf("Failed to recreate missing pod %s: %v", p.podName, createErr)
+					}
 				}
-
-				continue
+			} else {
+				// If health check passes and we previously had a not found error,
+				// update the last transition time so we can track how long the pod has been healthy
+				p.statusMutex.Lock()
+				if strings.Contains(p.status.LastError, "Pod not found") && p.status.Healthy {
+					p.status.LastTransition = time.Now()
+				}
+				p.statusMutex.Unlock()
 			}
-
-			// Update status based on pod status
-			p.updatePodStatus(pod)
 		}
 	}
 }
 
-// updatePodStatus updates the workload status based on pod status
+// updatePodStatus updates pod details in the workload status
 func (p *ProcessWorkload) updatePodStatus(pod *corev1.Pod) {
 	p.updateStatus(func(s *common.WorkloadStatus) {
+		// Only update pod details here, not health status
 		s.Details["podPhase"] = string(pod.Status.Phase)
 		s.Details["podIP"] = pod.Status.PodIP
 		s.Details["hostIP"] = pod.Status.HostIP
+		s.Details["nodeName"] = pod.Spec.NodeName
 
-		// Check if pod is running and ready
-		if pod.Status.Phase == corev1.PodRunning {
-			s.Active = true
+		// Add container resource usage if available
+		if len(pod.Status.ContainerStatuses) > 0 {
+			s.Details["containerReady"] = pod.Status.ContainerStatuses[0].Ready
+			s.Details["containerRestartCount"] = pod.Status.ContainerStatuses[0].RestartCount
 
-			// Check if all containers are ready
-			allReady := true
-			for _, containerStatus := range pod.Status.ContainerStatuses {
-				if !containerStatus.Ready {
-					allReady = false
-					break
-				}
+			// Add state information
+			if pod.Status.ContainerStatuses[0].State.Running != nil {
+				s.Details["containerStartTime"] = pod.Status.ContainerStatuses[0].State.Running.StartedAt
 			}
-
-			s.Healthy = allReady && p.monitoringServer.IsLeaderAndNormal()
-
-			if !allReady {
-				s.LastError = "Not all containers are ready"
-			} else {
-				s.LastError = ""
-			}
-		} else if pod.Status.Phase == corev1.PodSucceeded {
-			s.Active = false
-			s.Healthy = p.monitoringServer.IsLeaderAndNormal()
-			s.LastError = ""
-		} else if pod.Status.Phase == corev1.PodFailed {
-			s.Active = false
-			s.Healthy = false
-
-			// Get container statuses for error information
-			for _, containerStatus := range pod.Status.ContainerStatuses {
-				if containerStatus.State.Terminated != nil && containerStatus.State.Terminated.ExitCode != 0 {
-					s.LastError = fmt.Sprintf("Container %s terminated with exit code %d: %s",
-						containerStatus.Name,
-						containerStatus.State.Terminated.ExitCode,
-						containerStatus.State.Terminated.Message)
-					break
-				}
-			}
-
-			if s.LastError == "" {
-				s.LastError = "Pod failed"
-			}
-		} else {
-			s.Active = true
-			s.Healthy = false
-			s.LastError = fmt.Sprintf("Pod in %s state", pod.Status.Phase)
 		}
 
-		// Update metrics
-		// Update monitoring status
-		if p.monitoringServer != nil {
-			p.monitoringServer.UpdateWorkloadStatus(string(p.GetType()), p.GetName(), p.namespace, s.Active)
+		// Add more detailed phase information
+		if pod.Status.Phase == corev1.PodPending {
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse {
+					s.Details["pendingReason"] = condition.Reason
+					s.Details["pendingMessage"] = condition.Message
+				}
+			}
 		}
+
+		// Don't update health status here, that's handled by checkHealth
 	})
 }
 

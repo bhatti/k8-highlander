@@ -1,0 +1,323 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workloadprocesses.highlander.plexobject.io
+spec:
+  group: highlander.plexobject.io
+  names:
+    kind: WorkloadProcess
+    listKind: WorkloadProcessList
+    plural: workloadprocesses
+    singular: workloadprocess
+    shortNames:
+      - wlp
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["image", "script"]
+              properties:
+                image:
+                  type: string
+                script:
+                  type: object
+                  required: ["commands"]
+                  properties:
+                    commands:
+                      type: array
+                      items:
+                        type: string
+                    shell:
+                      type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                resources:
+                  type: object
+                  properties:
+                    cpuRequest:
+                      type: string
+                    memoryRequest:
+                      type: string
+                    cpuLimit:
+                      type: string
+                    memoryLimit:
+                      type: string
+                restartPolicy:
+                  type: string
+                maxRestarts:
+                  type: integer
+                gracePeriod:
+                  type: string
+      additionalPrinterColumns:
+      - name: Image
+        type: string
+        jsonPath: .spec.image
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workloadservices.highlander.plexobject.io
+spec:
+  group: highlander.plexobject.io
+  names:
+    kind: WorkloadService
+    listKind: WorkloadServiceList
+    plural: workloadservices
+    singular: workloadservice
+    shortNames:
+      - wls
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["image", "script", "replicas"]
+              properties:
+                replicas:
+                  type: integer
+                image:
+                  type: string
+                script:
+                  type: object
+                  required: ["commands"]
+                  properties:
+                    commands:
+                      type: array
+                      items:
+                        type: string
+                    shell:
+                      type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                resources:
+                  type: object
+                  properties:
+                    cpuRequest:
+                      type: string
+                    memoryRequest:
+                      type: string
+                    cpuLimit:
+                      type: string
+                    memoryLimit:
+                      type: string
+                ports:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      containerPort:
+                        type: integer
+                      servicePort:
+                        type: integer
+                healthCheckPath:
+                  type: string
+                healthCheckPort:
+                  type: integer
+                readinessTimeout:
+                  type: string
+      additionalPrinterColumns:
+      - name: Replicas
+        type: integer
+        jsonPath: .spec.replicas
+      - name: Image
+        type: string
+        jsonPath: .spec.image
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workloadcronjobs.highlander.plexobject.io
+spec:
+  group: highlander.plexobject.io
+  names:
+    kind: WorkloadCronJob
+    listKind: WorkloadCronJobList
+    plural: workloadcronjobs
+    singular: workloadcronjob
+    shortNames:
+      - wlc
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["image", "script", "schedule"]
+              properties:
+                schedule:
+                  type: string
+                image:
+                  type: string
+                script:
+                  type: object
+                  required: ["commands"]
+                  properties:
+                    commands:
+                      type: array
+                      items:
+                        type: string
+                    shell:
+                      type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                resources:
+                  type: object
+                  properties:
+                    cpuRequest:
+                      type: string
+                    memoryRequest:
+                      type: string
+                    cpuLimit:
+                      type: string
+                    memoryLimit:
+                      type: string
+                restartPolicy:
+                  type: string
+      additionalPrinterColumns:
+      - name: Schedule
+        type: string
+        jsonPath: .spec.schedule
+      - name: Image
+        type: string
+        jsonPath: .spec.image
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: workloadpersistents.highlander.plexobject.io
+spec:
+  group: highlander.plexobject.io
+  names:
+    kind: WorkloadPersistent
+    listKind: WorkloadPersistentList
+    plural: workloadpersistents
+    singular: workloadpersistent
+    shortNames:
+      - wlper
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["image", "script", "replicas"]
+              properties:
+                replicas:
+                  type: integer
+                image:
+                  type: string
+                script:
+                  type: object
+                  required: ["commands"]
+                  properties:
+                    commands:
+                      type: array
+                      items:
+                        type: string
+                    shell:
+                      type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                resources:
+                  type: object
+                  properties:
+                    cpuRequest:
+                      type: string
+                    memoryRequest:
+                      type: string
+                    cpuLimit:
+                      type: string
+                    memoryLimit:
+                      type: string
+                ports:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      containerPort:
+                        type: integer
+                      servicePort:
+                        type: integer
+                persistentVolumes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      mountPath:
+                        type: string
+                      storageClassName:
+                        type: string
+                      size:
+                        type: string
+                serviceName:
+                  type: string
+                healthCheckPath:
+                  type: string
+                healthCheckPort:
+                  type: integer
+                readinessTimeout:
+                  type: string
+      additionalPrinterColumns:
+      - name: Replicas
+        type: integer
+        jsonPath: .spec.replicas
+      - name: Image
+        type: string
+        jsonPath: .spec.image
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp

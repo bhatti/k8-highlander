@@ -121,6 +121,17 @@ type BaseWorkloadConfig struct {
 	Sidecars               []ContainerConfig `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
 	Replicas               int32             `json:"replicas"`
 	TerminationGracePeriod time.Duration     `json:"terminationGracePeriod,omitempty" yaml:"terminationGracePeriod,omitempty"`
+
+	// New fields for CRD references
+	WorkloadCRDRef *WorkloadCRDReference `json:"workloadCRDRef,omitempty" yaml:"workloadCRDRef,omitempty"`
+}
+
+// WorkloadCRDReference defines a reference to a Workload CRD
+type WorkloadCRDReference struct {
+	APIVersion string `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string `json:"kind" yaml:"kind"`
+	Name       string `json:"name" yaml:"name"`
+	Namespace  string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 }
 
 func ContainersSummary(containers []corev1.Container) string {

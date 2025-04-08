@@ -355,7 +355,7 @@ func (c *CronJobWorkload) createOrUpdateCronJob(ctx context.Context, suspend boo
 				return fmt.Errorf("failed to update cron job: %w", err)
 			}
 
-			klog.Infof("Updated cron job %s in namespace %s (suspend=%v) [%v]",
+			klog.V(4).Infof("Updated cron job %s in namespace %s (suspend=%v) [%v]",
 				c.config.Name, c.config.Namespace, suspend, c.monitoringServer.GetLeaderInfo())
 		}
 
@@ -400,39 +400,103 @@ func (c *CronJobWorkload) monitorHealth(ctx context.Context) {
 	}
 }
 
-// checkHealth checks the health of the cron job
+// checkHealth checks the health of the cron job with retries
 func (c *CronJobWorkload) checkHealth(ctx context.Context) error {
-	cronJob, err := c.client.BatchV1().CronJobs(c.config.Namespace).Get(ctx, c.config.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Update metrics
-			if c.metrics != nil {
-				c.metrics.CronJobStatus.WithLabelValues(c.GetName(), c.config.Namespace).Set(0)
+	// Define the health check function that will be retried
+	checkFn := func() (bool, string, error) {
+		cronJob, err := c.client.BatchV1().CronJobs(c.config.Namespace).Get(ctx, c.config.Name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, "CronJob not found", err
 			}
-
-			// Update monitoring status
-			if c.monitoringServer != nil {
-				c.monitoringServer.UpdateWorkloadStatus(string(c.GetType()), c.GetName(), c.config.Namespace, false)
-			}
-			return fmt.Errorf("cron job not found: %w", err)
+			return false, fmt.Sprintf("Error getting CronJob: %v", err), err
 		}
-		return err
+
+		// Determine the actual active state of the CronJob
+		isSuspended := cronJob.Spec.Suspend != nil && *cronJob.Spec.Suspend
+		isActive := !isSuspended
+
+		// Get the expected state from our configuration
+		c.statusMutex.RLock()
+		shouldBeActive := c.status.Active
+		c.statusMutex.RUnlock()
+
+		// Check if the suspension state matches what we expect
+		if shouldBeActive && isSuspended {
+			return false, "CronJob is suspended but should be active",
+				fmt.Errorf("cronJob is suspended but should be active")
+		}
+
+		if !shouldBeActive && !isSuspended {
+			return false, "CronJob is active but should be suspended",
+				fmt.Errorf("cronJob is active but should be suspended")
+		}
+
+		// Check the last schedule time and last successful job
+		if cronJob.Status.LastScheduleTime != nil {
+			// If it's been scheduled but no jobs have succeeded and it's been more than X time
+			timeSinceLastSchedule := time.Since(cronJob.Status.LastScheduleTime.Time)
+
+			// If the job was scheduled more than 1 hour ago but there's no success or active jobs,
+			// there might be a problem - but only check this for active jobs
+			if isActive && timeSinceLastSchedule > time.Hour &&
+				cronJob.Status.LastSuccessfulTime == nil &&
+				len(cronJob.Status.Active) == 0 {
+				return false, fmt.Sprintf("CronJob was scheduled %v ago, but no successful runs",
+					timeSinceLastSchedule), nil
+			}
+		}
+
+		// Check active jobs for too many failures
+		if len(cronJob.Status.Active) > 0 {
+			// Look at the active jobs to see if they're healthy
+			for _, jobRef := range cronJob.Status.Active {
+				job, err := c.client.BatchV1().Jobs(jobRef.Namespace).Get(ctx, jobRef.Name, metav1.GetOptions{})
+				if err != nil {
+					if !errors.IsNotFound(err) {
+						return false, fmt.Sprintf("Error getting active job %s: %v", jobRef.Name, err), nil
+					}
+					continue
+				}
+
+				// Check for job failures
+				if job.Status.Failed > 0 {
+					return false, fmt.Sprintf("Active job %s has %d failures",
+						job.Name, job.Status.Failed), nil
+				}
+			}
+		}
+
+		// For suspended CronJobs, we consider them healthy if they are intentionally suspended
+		// For active CronJobs, we've checked that they're not having issues with their jobs
+		return true, "", nil
 	}
+
+	// Perform the health check with retries
+	healthy, errMsg, err := common.RetryHealthCheck(ctx, 5, 1*time.Second, checkFn)
 
 	// Update status with details
 	c.updateStatus(func(s *common.WorkloadStatus) {
-		s.Details["lastScheduleTime"] = cronJob.Status.LastScheduleTime
-		s.Details["activeJobs"] = len(cronJob.Status.Active)
-		s.Active = !*cronJob.Spec.Suspend
-		s.Healthy = c.monitoringServer.IsLeaderAndNormal()
+		cronJob, getErr := c.client.BatchV1().CronJobs(c.config.Namespace).Get(ctx, c.config.Name, metav1.GetOptions{})
+		if getErr == nil {
+			s.Details["lastScheduleTime"] = cronJob.Status.LastScheduleTime
+			s.Details["activeJobs"] = len(cronJob.Status.Active)
 
-		// Check if there are any active jobs
-		if len(cronJob.Status.Active) > 0 {
-			s.Details["activeJobNames"] = []string{}
-			for _, job := range cronJob.Status.Active {
-				s.Details["activeJobNames"] = append(s.Details["activeJobNames"].([]string), job.Name)
+			// Update the active status based on the actual CronJob state
+			isSuspended := cronJob.Spec.Suspend != nil && *cronJob.Spec.Suspend
+			s.Active = !isSuspended
+
+			// Check if there are any active jobs
+			if len(cronJob.Status.Active) > 0 {
+				s.Details["activeJobNames"] = []string{}
+				for _, job := range cronJob.Status.Active {
+					s.Details["activeJobNames"] = append(s.Details["activeJobNames"].([]string), job.Name)
+				}
 			}
 		}
+
+		s.Healthy = healthy && c.monitoringServer.IsLeaderAndNormal()
+		s.LastError = errMsg
 
 		// Update metrics
 		if c.metrics != nil {
@@ -445,7 +509,7 @@ func (c *CronJobWorkload) checkHealth(ctx context.Context) error {
 		}
 	})
 
-	return nil
+	return err
 }
 
 // buildCronJob builds a Kubernetes CronJob from the config

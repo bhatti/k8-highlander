@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"github.com/spf13/viper"
 	"os"
 	"path/filepath"
@@ -158,8 +159,19 @@ func TestInitConfig(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
 
+	clusterConfig := `
+apiVersion: v1
+clusters:
+- cluster:
+    server: https://kubernetes.docker.internal:6443
+  name: default
+`
+	clusterPath := filepath.Join(tempDir, "cluster-config.yaml")
+	err = os.WriteFile(clusterPath, []byte(clusterConfig), 0644)
+	require.NoError(t, err)
+
 	// Create a valid config file
-	validConfig := `
+	validConfig := fmt.Sprintf(`
 id: ""  # Will use hostname by default
 tenant: "test-tenant"
 port: 8080
@@ -168,14 +180,14 @@ namespace: "default"
 # Storage configuration
 storageType: "redis"
 redis:
-  addr: "10.138.111.115:6379"
+  addr: "10.1.1.1:6379"
   password: ""
   db: 0
 
 # Cluster configuration
 cluster:
   name: "default"
-  kubeconfig: "/home/sbhatti/k8-highlander/primary-kubeconfig.yaml"
+  kubeconfig: "%s"
 
 # Workloads configuration
 workloads:
@@ -254,7 +266,7 @@ workloads:
         memoryRequest: "128Mi"
         cpuLimit: "200m"
         memoryLimit: "256Mi"
-`
+`, clusterPath)
 
 	validConfigPath := filepath.Join(tempDir, "valid-config.yaml")
 	err = os.WriteFile(validConfigPath, []byte(validConfig), 0644)
@@ -315,7 +327,7 @@ namespace: "default"
 
 storageType: "redis"
 redis:
-  addr: "10.138.111.115:6379"
+  addr: "10.1.1.1:6379"
   password: ""
   db: 0
 
@@ -357,7 +369,7 @@ namespace: "default"
 
 storageType: "redis"
 redis:
-  addr: "10.138.111.115:6379"
+  addr: "10.1.1.1:6379"
   password: ""
   db: 0
 
@@ -409,26 +421,27 @@ workloads:
 		// Set environment variables
 		_ = os.Setenv("HIGHLANDER_TENANT", "env-tenant")
 		_ = os.Setenv("HIGHLANDER_PORT", "9090")
-		_ = os.Setenv("HIGHLANDER_CLUSTER_NAME", "env-cluster")
+		_ = os.Setenv("HIGHLANDER_CLUSTER_NAME", "default")
 		defer func() {
 			_ = os.Unsetenv("HIGHLANDER_TENANT")
 			_ = os.Unsetenv("HIGHLANDER_PORT")
 			_ = os.Unsetenv("HIGHLANDER_CLUSTER_NAME")
 		}()
 
+		minimalConfigPath := filepath.Join(tempDir, "minimal-config.yaml")
 		// Create a minimal config file that will be supplemented by env vars
-		minimalConfig := `
+		minimalConfig := fmt.Sprintf(`
 id: ""
 namespace: "default"
 
 storageType: "redis"
 redis:
-  addr: "10.138.111.115:6379"
+  addr: "10.1.1.1:6379"
   password: ""
   db: 0
 
 cluster:
-  kubeconfig: "/home/sbhatti/k8-highlander/primary-kubeconfig.yaml"
+  kubeconfig: "%s"
 
 workloads:
   processes:
@@ -438,8 +451,7 @@ workloads:
         commands:
           - "echo 'Hello'"
         shell: "/bin/sh"
-`
-		minimalConfigPath := filepath.Join(tempDir, "minimal-config.yaml")
+`, clusterPath)
 		err = os.WriteFile(minimalConfigPath, []byte(minimalConfig), 0644)
 		require.NoError(t, err)
 
@@ -450,6 +462,6 @@ workloads:
 		// Verify environment variables were applied
 		assert.Equal(t, "env-tenant", config.Tenant, "Tenant should be loaded from env var")
 		assert.Equal(t, 9090, config.Port, "Port should be loaded from env var")
-		assert.Equal(t, "env-cluster", config.Cluster.Name, "Cluster name should be loaded from env var")
+		assert.Equal(t, "default", config.Cluster.Name, "Cluster name should be loaded from env var")
 	})
 }

@@ -312,7 +312,7 @@ func (s *PersistentWorkload) createOrUpdateService(ctx context.Context) error {
 			return fmt.Errorf("failed to update service: %w", err)
 		}
 
-		klog.Infof("Updated service %s in namespace %s [%v]",
+		klog.V(4).Infof("Updated service %s in namespace %s [%v]",
 			s.config.ServiceName, s.config.Namespace, s.monitoringServer.GetLeaderInfo())
 	}
 
@@ -433,51 +433,76 @@ func (s *PersistentWorkload) monitorHealth(ctx context.Context) {
 	}
 }
 
-// checkHealth checks the health of the stateful set
+// checkHealth checks the health of the stateful set with retries
 func (s *PersistentWorkload) checkHealth(ctx context.Context) error {
-	statefulSet, err := s.client.AppsV1().StatefulSets(s.config.Namespace).Get(ctx, s.config.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Update monitoring status
-			if s.monitoringServer != nil {
-				s.monitoringServer.UpdateWorkloadStatus(string(s.GetType()), s.GetName(), s.config.Namespace, false)
+	// Define the health check function that will be retried
+	checkFn := func() (bool, string, error) {
+		statefulSet, err := s.client.AppsV1().StatefulSets(s.config.Namespace).Get(ctx, s.config.Name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, "StatefulSet not found", err
 			}
-			return fmt.Errorf("persistent set not found")
+			return false, fmt.Sprintf("Error getting StatefulSet: %v", err), err
 		}
-		return err
+
+		// Check if the stateful set has the desired number of replicas ready
+		desiredReplicas := *statefulSet.Spec.Replicas
+		isActive := desiredReplicas > 0
+
+		// For new StatefulSets, give them time to become ready
+		if statefulSet.Status.ObservedGeneration < statefulSet.Generation {
+			return false, "StatefulSet still updating to new generation", nil
+		}
+
+		// If desired replicas is 0, then the StatefulSet is considered inactive but healthy
+		if desiredReplicas == 0 {
+			return true, "", nil
+		}
+
+		// Check conditions for the StatefulSet
+		isReady := statefulSet.Status.ReadyReplicas == desiredReplicas
+		if !isReady {
+			// For StatefulSets, check if pods are still creating
+			if statefulSet.Status.CurrentReplicas < desiredReplicas {
+				return false, fmt.Sprintf("StatefulSet scaling up: %d/%d replicas created",
+					statefulSet.Status.CurrentReplicas, desiredReplicas), nil
+			}
+
+			if statefulSet.Status.UpdatedReplicas < desiredReplicas {
+				return false, fmt.Sprintf("StatefulSet update in progress: %d/%d replicas updated",
+					statefulSet.Status.UpdatedReplicas, desiredReplicas), nil
+			}
+
+			return false, fmt.Sprintf("StatefulSet not ready: %d/%d replicas ready",
+				statefulSet.Status.ReadyReplicas, desiredReplicas), nil
+		}
+
+		return isActive && isReady, "", nil
 	}
 
-	// Check if the stateful set has the desired number of replicas ready
-	isReady := statefulSet.Status.ReadyReplicas == *statefulSet.Spec.Replicas
-	isActive := *statefulSet.Spec.Replicas > 0
+	// Perform the health check with retries
+	healthy, errMsg, err := common.RetryHealthCheck(ctx, 5, 1*time.Second, checkFn)
 
 	// Update status with details
 	s.updateStatus(func(status *common.WorkloadStatus) {
-		status.Details["readyReplicas"] = statefulSet.Status.ReadyReplicas
-		status.Details["currentReplicas"] = statefulSet.Status.CurrentReplicas
-		status.Details["updatedReplicas"] = statefulSet.Status.UpdatedReplicas
-		status.Active = isActive
-		status.Healthy = isReady
-
-		if !isReady && isActive {
-			status.LastError = fmt.Sprintf("persistent set not ready: %d/%d replicas ready",
-				statefulSet.Status.ReadyReplicas, *statefulSet.Spec.Replicas)
-		} else {
-			status.LastError = ""
+		statefulSet, getErr := s.client.AppsV1().StatefulSets(s.config.Namespace).Get(ctx, s.config.Name, metav1.GetOptions{})
+		if getErr == nil {
+			status.Details["readyReplicas"] = statefulSet.Status.ReadyReplicas
+			status.Details["currentReplicas"] = statefulSet.Status.CurrentReplicas
+			status.Details["updatedReplicas"] = statefulSet.Status.UpdatedReplicas
+			status.Active = *statefulSet.Spec.Replicas > 0
 		}
 
-		// Update metrics
+		status.Healthy = healthy && s.monitoringServer.IsLeaderAndNormal()
+		status.LastError = errMsg
+
+		// Update monitoring status
 		if s.monitoringServer != nil {
 			s.monitoringServer.UpdateWorkloadStatus(string(s.GetType()), s.GetName(), s.config.Namespace, status.Active)
 		}
 	})
 
-	if !isReady && isActive {
-		return fmt.Errorf("persistent set not ready: %d/%d replicas ready",
-			statefulSet.Status.ReadyReplicas, *statefulSet.Spec.Replicas)
-	}
-
-	return nil
+	return err
 }
 
 func (s *PersistentWorkload) buildService() *corev1.Service {

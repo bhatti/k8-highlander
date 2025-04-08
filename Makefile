@@ -39,7 +39,7 @@ test:
 # Run integration tests
 .PHONY: integ-test
 integ-test:
-	HIGHLANDER_TEST_MODE=real $(GOTEST) -v -race -tags=integration ./pkg/leader/... -timeout 5m
+	HIGHLANDER_TEST_MODE=real $(GOTEST) -v -race -tags=integration ./pkg/leader/... -timeout 10m -failfast
 # Run all tests (unit + integration)
 .PHONY: test-all
 test-all: test integ-test

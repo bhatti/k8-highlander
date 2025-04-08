@@ -78,7 +78,7 @@ func NewPersistentManager(namespace, configDir string, metrics *monitoring.Contr
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
 		status: common.WorkloadStatus{
-			Name:    "persistentsets",
+			Name:    "persistent",
 			Type:    common.WorkloadTypeCustom,
 			Active:  false,
 			Healthy: true,
@@ -153,14 +153,14 @@ func (m *PersistentManager) GetStatus() common.WorkloadStatus {
 		persistentSetStatuses[name] = persistentSet.GetStatus()
 	}
 
-	status.Details["persistentSets"] = persistentSetStatuses
+	status.Details["persistent"] = persistentSetStatuses
 
 	return status
 }
 
 // GetName returns the name of the workload
 func (m *PersistentManager) GetName() string {
-	return "persistentsets"
+	return "persistent"
 }
 
 // GetType returns the type of the workload
@@ -171,12 +171,12 @@ func (m *PersistentManager) GetType() common.WorkloadType {
 // loadStatefulSetConfigs loads persistent set configurations from files
 func (m *PersistentManager) loadStatefulSetConfigs() error {
 	// Find all persistent set config files
-	yamlFiles, err := filepath.Glob(filepath.Join(m.configDir, "persistentset-*.yaml"))
+	yamlFiles, err := filepath.Glob(filepath.Join(m.configDir, "persistent-*.yaml"))
 	if err != nil {
 		return common.NewSevereError("PersistentManager", "failed to find persistent set yaml config files", err)
 	}
 
-	ymlFiles, err := filepath.Glob(filepath.Join(m.configDir, "persistentset-*.yml"))
+	ymlFiles, err := filepath.Glob(filepath.Join(m.configDir, "persistent-*.yml"))
 	if err != nil {
 		return common.NewSevereError("PersistentManager", "failed to find persistent set yml config files", err)
 	}

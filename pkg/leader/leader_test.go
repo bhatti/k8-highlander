@@ -139,10 +139,10 @@ func (m *MockWorkloadManager) StopAll(ctx context.Context) error {
 	return m.stopError
 }
 
-func (m *MockWorkloadManager) AddWorkload(name string, workload common.Workload) error {
+func (m *MockWorkloadManager) AddWorkload(workload common.Workload) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.workloads[name] = workload
+	m.workloads[workload.GetName()] = workload
 	return nil
 }
 
@@ -342,8 +342,8 @@ func NewTestEnv(t *testing.T, namespace string) *TestEnv {
 	// Add some mock workloads
 	mockProcess := NewMockWorkload("test-process", common.WorkloadTypeProcess)
 	mockCronJob := NewMockWorkload("test-cronjob", common.WorkloadTypeCronJob)
-	_ = env.mockWorkloadMgr.AddWorkload(mockProcess.GetName(), mockProcess)
-	_ = env.mockWorkloadMgr.AddWorkload(mockCronJob.GetName(), mockCronJob)
+	_ = env.mockWorkloadMgr.AddWorkload(mockProcess)
+	_ = env.mockWorkloadMgr.AddWorkload(mockCronJob)
 
 	// Setup clusters
 	env.setupClusters()
@@ -756,7 +756,7 @@ func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Mana
 	}
 
 	// Add the workload to the manager
-	if err := manager.AddWorkload(processWorkload.GetName(), processWorkload); err != nil {
+	if err := manager.AddWorkload(processWorkload); err != nil {
 		e.t.Logf("Failed to add singleton process workload to manager: %v", err)
 		return manager
 	}
@@ -802,7 +802,7 @@ func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Mana
 	}
 
 	// Add the workload to the manager
-	if err := manager.AddWorkload(cronJobWorkload.GetName(), cronJobWorkload); err != nil {
+	if err := manager.AddWorkload(cronJobWorkload); err != nil {
 		e.t.Logf("Failed to add singleton cron job workload to manager: %v", err)
 		return manager
 	}
@@ -1485,11 +1485,11 @@ func TestLeaderFailoverWithWorkloads(t *testing.T) {
 
 	// Add a simple process workload to both managers
 	processWorkload1 := NewMockWorkload("failover-test-process", common.WorkloadTypeProcess)
-	err := workloadMgr1.AddWorkload(processWorkload1.GetName(), processWorkload1)
+	err := workloadMgr1.AddWorkload(processWorkload1)
 	require.NoError(t, err)
 
 	processWorkload2 := NewMockWorkload("failover-test-process", common.WorkloadTypeProcess)
-	err = workloadMgr2.AddWorkload(processWorkload2.GetName(), processWorkload2)
+	err = workloadMgr2.AddWorkload(processWorkload2)
 	require.NoError(t, err)
 
 	// Create controllers
@@ -1865,7 +1865,7 @@ func TestRealWorkloads(t *testing.T) {
 	// Create a process workload
 	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(processWorkload.GetName(), processWorkload)
+	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -1986,7 +1986,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 	}
 	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(processWorkload.GetName(), processWorkload)
+	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
 
 	// 2. CronJob workload
@@ -2017,7 +2017,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 	}
 	cronJobWorkload, err := cronjob.NewCronJobWorkload(cronJobConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(cronJobWorkload.GetName(), cronJobWorkload)
+	err = workloadMgr.AddWorkload(cronJobWorkload)
 	require.NoError(t, err)
 
 	// 3. Deployment workload (like Jobs)
@@ -2047,7 +2047,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 	}
 	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(deploymentWorkload.GetName(), deploymentWorkload)
+	err = workloadMgr.AddWorkload(deploymentWorkload)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -2387,7 +2387,7 @@ func TestProcessManagerWithMultipleProcesses(t *testing.T) {
 
 	// Create a workload manager and add the process manager
 	workloadMgr := env.NewManager()
-	err = workloadMgr.AddWorkload("processes", processManager)
+	err = workloadMgr.AddWorkload(processManager)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -2509,12 +2509,12 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 
 	processWorkload1, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr1.AddWorkload(processWorkload1.GetName(), processWorkload1)
+	err = workloadMgr1.AddWorkload(processWorkload1)
 	require.NoError(t, err)
 
 	processWorkload2, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr2.AddWorkload(processWorkload2.GetName(), processWorkload2)
+	err = workloadMgr2.AddWorkload(processWorkload2)
 	require.NoError(t, err)
 
 	// Create controllers
@@ -2663,12 +2663,12 @@ func TestRealWorldScenario(t *testing.T) {
 
 	// Add a process manager
 	processManager := process.NewProcessManager(env.namespace, tempDir, env.metrics, env.monitorServer)
-	err = workloadMgr.AddWorkload("processes", processManager)
+	err = workloadMgr.AddWorkload(processManager)
 	require.NoError(t, err)
 
 	// Add a cronjob manager
 	cronJobManager := cronjob.NewCronJobManager(env.namespace, tempDir, env.metrics, env.monitorServer)
-	err = workloadMgr.AddWorkload("cronjobs", cronJobManager)
+	err = workloadMgr.AddWorkload(cronJobManager)
 	require.NoError(t, err)
 
 	// Add a deployment workload (like Jobs Manager)
@@ -2698,7 +2698,7 @@ func TestRealWorldScenario(t *testing.T) {
 	}
 	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(deploymentWorkload.GetName(), deploymentWorkload)
+	err = workloadMgr.AddWorkload(deploymentWorkload)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -2811,7 +2811,7 @@ func TestDockerCommandExecution(t *testing.T) {
 
 	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 	require.NoError(t, err)
-	err = workloadMgr.AddWorkload(processWorkload.GetName(), processWorkload)
+	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -2899,7 +2899,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 
 		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 		require.NoError(t, err)
-		err = workloadMgr.AddWorkload(processWorkload.GetName(), processWorkload)
+		err = workloadMgr.AddWorkload(processWorkload)
 		require.NoError(t, err)
 
 		// Create a controller with Redis storage
@@ -2972,7 +2972,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 
 		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
 		require.NoError(t, err)
-		err = workloadMgr.AddWorkload(processWorkload.GetName(), processWorkload)
+		err = workloadMgr.AddWorkload(processWorkload)
 		require.NoError(t, err)
 
 		// Create a controller with DB storage

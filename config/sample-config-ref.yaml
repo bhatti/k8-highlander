@@ -1,0 +1,128 @@
+id: "highlander-controller"
+tenant: "test-tenant"
+port: 8080
+namespace: "default"
+
+# Storage configuration
+storageType: "redis"
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+# Cluster configuration
+cluster:
+  name: "default"
+  kubeconfig: "~/.kube/config"
+
+# Workloads configuration
+workloads:
+  processes:
+    # A process defined inline
+    - name: "inline-process"
+      image: "busybox:latest"
+      script:
+        commands:
+          - "echo 'Starting process'"
+          - "while true; do echo \"Heartbeat at $(date)\"; sleep 10; done"
+        shell: "/bin/sh"
+      env:
+        TEST_ENV: "test-value"
+      resources:
+        cpuRequest: "100m"
+        memoryRequest: "64Mi"
+        cpuLimit: "200m"
+        memoryLimit: "128Mi"
+      restartPolicy: "Never"
+    
+    # A process that references a CRD
+    - name: "crd-process"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadProcess"
+        name: "singleton-process"
+        namespace: "default"
+
+  services:
+    # A service defined inline
+    - name: "inline-service"
+      replicas: 1
+      image: "nginx:alpine"
+      script:
+        commands:
+          - "nginx -g 'daemon off;'"
+        shell: "/bin/sh"
+      ports:
+        - name: "http"
+          containerPort: 80
+          servicePort: 8181
+      resources:
+        cpuRequest: "100m"
+        memoryRequest: "64Mi"
+        cpuLimit: "200m"
+        memoryLimit: "128Mi"
+    
+    # A service that references a CRD
+    - name: "crd-service"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadService"
+        name: "singleton-service"
+        namespace: "default"
+
+  cronJobs:
+    # A cron job defined inline
+    - name: "inline-cron"
+      schedule: "*/5 * * * *"
+      image: "busybox:latest"
+      script:
+        commands:
+          - "echo 'Running cron job at $(date)'"
+        shell: "/bin/sh"
+      env:
+        TEST_ENV: "test-value"
+      resources:
+        cpuRequest: "50m"
+        memoryRequest: "32Mi"
+        cpuLimit: "100m"
+        memoryLimit: "64Mi"
+      restartPolicy: "OnFailure"
+    
+    # A cron job that references a CRD
+    - name: "crd-cron"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadCronJob"
+        name: "singleton-cron"
+        namespace: "default"
+
+  persistentSets:
+    # A persistent set defined inline
+    - name: "inline-persistent"
+      replicas: 1
+      image: "redis:alpine"
+      script:
+        commands:
+          - "redis-server"
+        shell: "/bin/sh"
+      ports:
+        - name: "redis"
+          containerPort: 6379
+          servicePort: 6379
+      persistentVolumes:
+        - name: "data"
+          mountPath: "/data"
+          size: "1Gi"
+      resources:
+        cpuRequest: "100m"
+        memoryRequest: "128Mi"
+        cpuLimit: "200m"
+        memoryLimit: "256Mi"
+    
+    # A persistent set that references a CRD
+    - name: "crd-persistent"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadPersistent"
+        name: "singleton-persistent"
+        namespace: "default"

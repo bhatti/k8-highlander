@@ -327,7 +327,7 @@ func (cfg *AppConfig) Validate() error {
 		return fmt.Errorf("cluster name is not specified")
 	}
 	if cfg.Cluster.Kubeconfig == "" {
-		return fmt.Errorf("cluster kubeconfig is not specified")
+		cfg.Cluster.Kubeconfig = "~/.kube/config"
 	}
 
 	if len(cfg.Workloads.Processes) == 0 && len(cfg.Workloads.CronJobs) == 0 &&

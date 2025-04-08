@@ -1,0 +1,108 @@
+---
+apiVersion: highlander.plexobject.io/v1
+kind: WorkloadProcess
+metadata:
+  name: singleton-process
+  namespace: default
+spec:
+  image: busybox:latest
+  script:
+    commands:
+      - "echo 'Starting singleton process from CRD'"
+      - "echo 'Process ID: $$'"
+      - "while true; do echo \"CRD heartbeat at $(date)\"; sleep 10; done"
+    shell: "/bin/sh"
+  env:
+    TEST_ENV: "from-crd"
+    SOURCE: "custom-resource"
+  resources:
+    cpuRequest: "50m"
+    memoryRequest: "32Mi"
+    cpuLimit: "100m"
+    memoryLimit: "64Mi"
+  restartPolicy: "Never"
+  maxRestarts: 3
+  gracePeriod: "15s"
+
+---
+apiVersion: highlander.plexobject.io/v1
+kind: WorkloadService
+metadata:
+  name: singleton-service
+  namespace: default
+spec:
+  replicas: 2
+  image: nginx:alpine
+  script:
+    commands:
+      - "nginx -g 'daemon off;'"
+    shell: "/bin/sh"
+  ports:
+    - name: "http"
+      containerPort: 80
+      servicePort: 80
+  healthCheckPath: "/health"
+  healthCheckPort: 80
+  readinessTimeout: "30s"
+  resources:
+    cpuRequest: "50m"
+    memoryRequest: "64Mi"
+    cpuLimit: "100m"
+    memoryLimit: "128Mi"
+  env:
+    SOURCE: "custom-resource"
+
+---
+apiVersion: highlander.plexobject.io/v1
+kind: WorkloadCronJob
+metadata:
+  name: singleton-cron
+  namespace: default
+spec:
+  schedule: "*/10 * * * *"
+  image: busybox:latest
+  script:
+    commands:
+      - "echo 'Running cron job from CRD at $(date)'"
+      - "echo 'Hostname: $(hostname)'"
+    shell: "/bin/sh"
+  env:
+    TEST_ENV: "from-crd"
+    SOURCE: "custom-resource"
+  resources:
+    cpuRequest: "25m"
+    memoryRequest: "16Mi"
+    cpuLimit: "50m"
+    memoryLimit: "32Mi"
+  restartPolicy: "OnFailure"
+
+---
+apiVersion: highlander.plexobject.io/v1
+kind: WorkloadPersistent
+metadata:
+  name: singleton-persistent
+  namespace: default
+spec:
+  replicas: 1
+  image: redis:alpine
+  script:
+    commands:
+      - "redis-server --appendonly yes"
+    shell: "/bin/sh"
+  ports:
+    - name: "redis"
+      containerPort: 6379
+      servicePort: 6379
+  persistentVolumes:
+    - name: "data"
+      mountPath: "/data"
+      size: "2Gi"
+      storageClassName: "standard"
+  resources:
+    cpuRequest: "50m"
+    memoryRequest: "64Mi"
+    cpuLimit: "100m"
+    memoryLimit: "128Mi"
+  serviceName: "redis-persistent"
+  env:
+    SOURCE: "custom-resource"

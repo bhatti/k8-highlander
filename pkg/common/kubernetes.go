@@ -45,41 +45,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"time"
 )
-
-// CreateKubernetesClient creates a properly configured Kubernetes client from a
-// kubeconfig file. It applies performance optimizations like increased QPS and
-// burst limits to avoid rate limiting in high-throughput scenarios.
-//
-// Parameters:
-//   - kubeconfigPath: Path to the kubeconfig file. If empty, uses in-cluster config.
-//
-// Returns:
-//   - kubernetes.Interface: The configured Kubernetes client
-//   - error: Any error encountered during client creation
-func CreateKubernetesClient(kubeconfigPath string) (kubernetes.Interface, error) {
-	// Build config from kubeconfig file
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("error building kubeconfig: %w", err)
-	}
-
-	// Increase QPS and Burst limits to avoid rate limiting during tests
-	config.QPS = 100
-	config.Burst = 100
-
-	// Create clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("error creating kubernetes client: %w", err)
-	}
-
-	return clientset, nil
-}
 
 // RetryWithBackoff executes an operation with exponential backoff retry logic.
 // It intelligently handles different types of errors, avoiding retries for
@@ -114,6 +83,38 @@ func RetryWithBackoff(ctx context.Context, operation string, fn func() error) er
 		klog.V(4).Infof("Retrying %s due to error: %v", operation, err)
 		return false, nil
 	})
+}
+
+// RetryHealthCheck performs a health check with retries
+func RetryHealthCheck(ctx context.Context, maxRetries int, retryInterval time.Duration,
+	checkFn func() (bool, string, error)) (bool, string, error) {
+
+	var lastErr error
+	var lastErrMsg string
+
+	for i := 0; i < maxRetries; i++ {
+		healthy, errMsg, err := checkFn()
+		if err == nil && healthy {
+			return true, "", nil
+		}
+
+		lastErr = err
+		lastErrMsg = errMsg
+
+		// If this is not the last retry, sleep before trying again
+		if i < maxRetries-1 {
+			klog.V(4).Infof("Health check failed (attempt %d/%d), retrying in %v: %v",
+				i+1, maxRetries, retryInterval, errMsg)
+			select {
+			case <-ctx.Done():
+				return false, "Context cancelled during health check", ctx.Err()
+			case <-time.After(retryInterval):
+				// Continue to next retry
+			}
+		}
+	}
+
+	return false, lastErrMsg, lastErr
 }
 
 // ForceDeletePod attempts to force delete a pod, first by removing finalizers, then using gracePeriodSeconds=0

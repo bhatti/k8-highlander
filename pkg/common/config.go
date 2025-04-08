@@ -54,6 +54,10 @@ import (
 	"gopkg.in/yaml.v3"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/klog/v2"
 	"log"
 	"os"
@@ -68,9 +72,10 @@ import (
 
 // ClusterConfig holds configuration for a Kubernetes cluster
 type ClusterConfig struct {
-	Name         string
-	Kubeconfig   string
-	clientHolder *ClientHolder
+	Name               string        `json:"name,omitempty" yaml:"name,omitempty"`
+	Kubeconfig         string        `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty"`
+	SelectedKubeconfig *rest.Config  `json:"-" yaml:"-"` // Not serialized
+	clientHolder       *ClientHolder `json:"-" yaml:"-"` // Not serialized
 }
 
 type ClientHolder struct {
@@ -219,6 +224,26 @@ func (c *AppConfig) BuildStorageConfig() (_ *StorageConfig, err error) {
 	}
 }
 
+func (c *ClusterConfig) InitKubernetesClient() (err error) {
+	if c.SelectedKubeconfig == nil {
+		c.SelectedKubeconfig, err = getKubeConfigForCluster(c.Kubeconfig, c.Name)
+		if err != nil {
+			return err
+		}
+	}
+	// Increase QPS and Burst limits to avoid rate limiting
+	c.SelectedKubeconfig.QPS = 100
+	c.SelectedKubeconfig.Burst = 100
+
+	// Create clientset
+	clientset, err := kubernetes.NewForConfig(c.SelectedKubeconfig)
+	if err != nil {
+		return fmt.Errorf("error creating kubernetes client: %w", err)
+	}
+	c.SetClient(clientset)
+	return nil
+}
+
 func verifyRedisConnection(addr string, rdb *redis.Client) error {
 	// Test Redis connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -249,7 +274,51 @@ func verifyRedisConnection(addr string, rdb *redis.Client) error {
 	return nil
 }
 
+// InitConfig initializes the application configuration from various sources
+// and loads any CRD-based workload configurations.
 func InitConfig(cfgFile string) (appConfig AppConfig, err error) {
+	// Load the basic configuration
+	appConfig, err = initConfigFromFile(cfgFile)
+	if err != nil {
+		return appConfig, err
+	}
+
+	// Create a Kubernetes client config that respects the cluster name
+	appConfig.Cluster.SelectedKubeconfig, err = getKubeConfigForCluster(
+		appConfig.Cluster.Kubeconfig, appConfig.Cluster.Name)
+	if err != nil {
+		klog.Warningf("Failed to create Kubernetes config for CRD loading: %v", err)
+		return appConfig, err
+	}
+
+	// Check if any workloads have CRD references
+	hasCRDRefs := checkForCRDReferences(&appConfig)
+
+	// If we have CRD references, we need to load them
+	if hasCRDRefs {
+		// Create a dynamic client for accessing CRDs
+		dynamicClient, err := dynamic.NewForConfig(appConfig.Cluster.SelectedKubeconfig)
+		if err != nil {
+			klog.Warningf("Failed to create dynamic client for CRD loading: %v", err)
+			return appConfig, err
+		}
+
+		// Load CRD configurations
+		if err := loadCRDConfigurations(context.Background(), &appConfig, dynamicClient); err != nil {
+			klog.Warningf("Failed to load CRD configurations: %v", err)
+			return appConfig, err
+		}
+	}
+
+	err = appConfig.Cluster.InitKubernetesClient()
+	if err != nil {
+		return appConfig, err
+	}
+
+	return appConfig, nil
+}
+
+func initConfigFromFile(cfgFile string) (appConfig AppConfig, err error) {
 	var rawConfig string
 
 	// Setup Viper for environment variables
@@ -277,6 +346,7 @@ func InitConfig(cfgFile string) (appConfig AppConfig, err error) {
 		fileContent, err := os.ReadFile(cfgFile)
 		if err == nil {
 			rawConfig = string(fileContent)
+			klog.V(4).Infof("Read raw config file: %s", cfgFile)
 		} else {
 			klog.Warningf("Failed to read raw config file for debugging: %v", err)
 		}
@@ -301,7 +371,7 @@ func InitConfig(cfgFile string) (appConfig AppConfig, err error) {
 			}
 		}
 	} else {
-		klog.Infof("No config file found, using flags and environment variables")
+		klog.Infof("Error reading config file: %s, using flags and environment variables: %s", cfgFile, err)
 	}
 
 	// Parse the YAML directly instead of using Viper's Unmarshal
@@ -408,4 +478,106 @@ func applyEnvironmentOverrides(config *AppConfig) {
 	if envClusterName := os.Getenv("HIGHLANDER_CLUSTER_NAME"); envClusterName != "" {
 		config.Cluster.Name = envClusterName
 	}
+}
+
+// checkForCRDReferences checks if any workloads have CRD references
+func checkForCRDReferences(config *AppConfig) bool {
+	// Check processes
+	for _, proc := range config.Workloads.Processes {
+		if proc.WorkloadCRDRef != nil {
+			return true
+		}
+	}
+
+	// Check services
+	for _, svc := range config.Workloads.Services {
+		if svc.WorkloadCRDRef != nil {
+			return true
+		}
+	}
+
+	// Check cron jobs
+	for _, cj := range config.Workloads.CronJobs {
+		if cj.WorkloadCRDRef != nil {
+			return true
+		}
+	}
+
+	// Check persistent sets
+	for _, ps := range config.Workloads.PersistentSets {
+		if ps.WorkloadCRDRef != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+// getKubeConfigForCluster creates a Kubernetes client config that specifically targets
+// the named cluster from the kubeconfig file. This ensures we're connecting to the right cluster
+// when the kubeconfig contains multiple clusters.
+func getKubeConfigForCluster(kubeconfigPath, clusterName string) (*rest.Config, error) {
+	// If no kubeconfig is specified, try in-cluster config
+	if kubeconfigPath == "" {
+		return rest.InClusterConfig()
+	}
+
+	// Load the kubeconfig file
+	config, err := clientcmd.LoadFromFile(kubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("error loading kubeconfig from %s: %w", kubeconfigPath, err)
+	}
+
+	// If no cluster name is specified, use the current context's cluster
+	if clusterName == "" {
+		// Use the default context
+		if config.CurrentContext == "" {
+			return nil, fmt.Errorf("no current context found in kubeconfig and no cluster name specified")
+		}
+
+		// Get the context
+		context, exists := config.Contexts[config.CurrentContext]
+		if !exists {
+			return nil, fmt.Errorf("current context %s not found in kubeconfig", config.CurrentContext)
+		}
+
+		// Use the cluster from the context
+		clusterName = context.Cluster
+	}
+
+	// Check if the specified cluster exists
+	_, exists := config.Clusters[clusterName]
+	if !exists {
+		klog.Warningf("invalid kubeconfig: %s, config: %v", kubeconfigPath, config)
+		return nil, fmt.Errorf("cluster %s not found in kubeconfig", clusterName)
+	}
+
+	// Create a REST config specifically for the named cluster
+	configOverrides := &clientcmd.ConfigOverrides{
+		ClusterInfo: api.Cluster{
+			Server: config.Clusters[clusterName].Server,
+		},
+		CurrentContext: "", // Don't use the current context
+	}
+
+	// Use the specified cluster
+	configOverrides.Context.Cluster = clusterName
+
+	// Create a ClientConfig with the specified overrides
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath},
+		configOverrides,
+	)
+
+	// Create the REST config
+	restConfig, err := clientConfig.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("error creating REST config for cluster %s: %w", clusterName, err)
+	}
+
+	// Increase QPS and Burst limits to avoid rate limiting
+	restConfig.QPS = 100
+	restConfig.Burst = 100
+
+	return restConfig, nil
 }

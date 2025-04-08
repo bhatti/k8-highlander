@@ -310,7 +310,7 @@ func (d *ServiceWorkload) createOrUpdateDeployment(ctx context.Context) error {
 			return fmt.Errorf("failed to update deployment: %w", err)
 		}
 
-		klog.Infof("Updated deployment %s in namespace %s, %s [%v]",
+		klog.V(4).Infof("Updated deployment %s in namespace %s, %s [%v]",
 			d.config.Name, d.config.Namespace,
 			common.ContainersSummary(deployment.Spec.Template.Spec.Containers), d.monitoringServer.GetLeaderInfo())
 	}
@@ -374,7 +374,7 @@ func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := d.checkHealth(ctx); err != nil {
-				klog.Errorf("Deployment health check failed: %v", err)
+				klog.Errorf("Deployment health check failed %s: %v", d.config.Name, err)
 
 				d.updateStatus(func(s *common.WorkloadStatus) {
 					s.Healthy = false
@@ -390,51 +390,92 @@ func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
 	}
 }
 
-// checkHealth checks the health of the deployment
+// checkHealth checks the health of the deployment with retries
 func (d *ServiceWorkload) checkHealth(ctx context.Context) error {
-	deployment, err := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
-	if err != nil {
-		if errors.IsNotFound(err) {
-			// Update monitoring status
-			if d.monitoringServer != nil && err == nil {
-				d.monitoringServer.UpdateWorkloadStatus(string(d.GetType()), d.GetName(), d.config.Namespace, false)
+	// Define the health check function that will be retried
+	checkFn := func() (bool, string, error) {
+		deployment, err := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, "Deployment not found", err
 			}
-			return fmt.Errorf("deployment not found")
+			return false, fmt.Sprintf("Error getting deployment: %v", err), err
 		}
-		return err
+
+		// Check if the deployment has the desired number of replicas available
+		desiredReplicas := *deployment.Spec.Replicas
+		isActive := desiredReplicas > 0
+
+		// For new deployments, give them time to become ready
+		if deployment.Status.ObservedGeneration < deployment.Generation {
+			return false, "Deployment still updating to new generation", nil
+		}
+
+		// Check if deployment is progressing as expected
+		var deploymentMessage string
+		for _, condition := range deployment.Status.Conditions {
+			if condition.Type == appsv1.DeploymentProgressing {
+				if condition.Status != corev1.ConditionTrue {
+					deploymentMessage = fmt.Sprintf("Deployment not progressing: %s - %s",
+						condition.Reason, condition.Message)
+				}
+			}
+			if condition.Type == appsv1.DeploymentReplicaFailure {
+				if condition.Status == corev1.ConditionTrue {
+					deploymentMessage = fmt.Sprintf("Deployment replica failure: %s - %s",
+						condition.Reason, condition.Message)
+				}
+			}
+		}
+
+		if deploymentMessage != "" {
+			return false, deploymentMessage, fmt.Errorf(deploymentMessage)
+		}
+
+		// If desired replicas is 0, then the deployment is considered inactive but healthy
+		if desiredReplicas == 0 {
+			return true, "", nil
+		}
+
+		// Otherwise check if enough replicas are ready
+		isReady := deployment.Status.ReadyReplicas == desiredReplicas
+		if !isReady {
+			// Check if we're just waiting for a rollout to complete
+			if deployment.Status.UpdatedReplicas < desiredReplicas {
+				return false, fmt.Sprintf("Deployment rollout in progress: %d/%d replicas updated",
+					deployment.Status.UpdatedReplicas, desiredReplicas), nil
+			}
+
+			return false, fmt.Sprintf("Deployment not ready: %d/%d replicas available",
+				deployment.Status.ReadyReplicas, desiredReplicas), nil
+		}
+
+		return isActive && isReady, "", nil
 	}
 
-	// Check if the deployment has the desired number of replicas available
-	isReady := deployment.Status.ReadyReplicas == *deployment.Spec.Replicas
-	isActive := *deployment.Spec.Replicas > 0
+	// Perform the health check with retries
+	healthy, errMsg, err := common.RetryHealthCheck(ctx, 5, 1*time.Second, checkFn)
 
 	// Update status with details
 	d.updateStatus(func(s *common.WorkloadStatus) {
-		s.Details["availableReplicas"] = deployment.Status.AvailableReplicas
-		s.Details["readyReplicas"] = deployment.Status.ReadyReplicas
-		s.Details["updatedReplicas"] = deployment.Status.UpdatedReplicas
-		s.Active = isActive
-		s.Healthy = isActive && isReady
-
-		if !isReady && isActive {
-			s.LastError = fmt.Sprintf("deployment not ready: %d/%d replicas available",
-				deployment.Status.ReadyReplicas, *deployment.Spec.Replicas)
-		} else {
-			s.LastError = ""
+		deployment, getErr := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
+		if getErr == nil {
+			s.Details["availableReplicas"] = deployment.Status.AvailableReplicas
+			s.Details["readyReplicas"] = deployment.Status.ReadyReplicas
+			s.Details["updatedReplicas"] = deployment.Status.UpdatedReplicas
+			s.Active = *deployment.Spec.Replicas > 0
 		}
 
+		s.Healthy = healthy && d.monitoringServer.IsLeaderAndNormal()
+		s.LastError = errMsg
+
 		// Update monitoring status
-		if d.monitoringServer != nil && err == nil {
+		if d.monitoringServer != nil {
 			d.monitoringServer.UpdateWorkloadStatus(string(d.GetType()), d.GetName(), d.config.Namespace, s.Active)
 		}
 	})
 
-	if !isReady && isActive {
-		return fmt.Errorf("deployment not ready: %d/%d replicas available",
-			deployment.Status.ReadyReplicas, *deployment.Spec.Replicas)
-	}
-
-	return nil
+	return err
 }
 
 // buildDeployment builds a Kubernetes Deployment from the config
@@ -546,7 +587,7 @@ func (d *ServiceWorkload) MonitorDeployment(ctx context.Context) {
 					if active {
 						klog.Warningf("Deployment %s not found, recreating", d.config.Name)
 						if err := d.createOrUpdateDeployment(ctx); err != nil {
-							klog.Errorf("Failed to recreate Deployment: %v", err)
+							klog.Errorf("Failed to recreate Deployment %s: %v", d.config.Name, err)
 						}
 					}
 				} else {
@@ -566,7 +607,7 @@ func (d *ServiceWorkload) MonitorDeployment(ctx context.Context) {
 					klog.Warningf("Deployment %s replicas changed externally (expected: %d, actual: %d), fixing",
 						d.config.Name, expectedReplicas, *deployment.Spec.Replicas)
 					if err := d.scaleDeployment(ctx, expectedReplicas); err != nil {
-						klog.Errorf("Failed to update Deployment replicas: %v", err)
+						klog.Errorf("Failed to update Deployment replicas %s: %v", d.config.Name, err)
 					}
 				}
 			}

@@ -552,13 +552,14 @@ class StatefulDashboard {
 
         // Debug log all workload types
         console.log("Available workload types:", Object.keys(workloads));
+        console.log("JSON:", JSON.stringify(workloads));
 
         // Map tab IDs to workload types
         const tabMappings = [
             { tabId: 'processes-content', type: 'processes', dataKey: 'processes', detailsKey: 'processes' },
             { tabId: 'cronjobs-content', type: 'cronJobs', dataKey: 'cronjobs', detailsKey: 'cronJobs' },
-            { tabId: 'services-content', type: 'services', dataKey: 'service', detailsKey: 'deployments' },
-            { tabId: 'persistent-content', type: 'persistentSets', dataKey: 'persistent', detailsKey: 'persistentSets' }
+            { tabId: 'services-content', type: 'services', dataKey: 'service', detailsKey: 'service' },
+            { tabId: 'persistent-content', type: 'persistentSets', dataKey: 'persistent', detailsKey: 'persistent' }
         ];
 
         // Update each tab
@@ -627,8 +628,8 @@ class StatefulDashboard {
         const typeDetailsMap = {
             'processes': 'processes',
             'cronjobs': 'cronJobs',
-            'service': 'deployments',
-            'persistent': 'persistentSets'
+            'service': 'service',
+            'persistent': 'persistent'
         };
 
         let rowCount = 0;
