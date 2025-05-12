@@ -41,3 +41,12 @@ var VERSION string
 var BuildInfo string
 
 const PACKAGE = "k8-highlander"
+
+const GROUP = "highlander.plexobject.io"
+
+const MajorVersion = "v1"
+
+const ProcessesResource = "workloadprocesses"
+const ServicesResource = "workloadservices"
+const CronjobsResource = "workloadcronjobs"
+const PersistentsResource = "workloadpersistents"

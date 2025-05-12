@@ -49,6 +49,10 @@ import (
 	"fmt"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"github.com/bhatti/k8-highlander/pkg/workloads/cronjob"
+	"github.com/bhatti/k8-highlander/pkg/workloads/persistent"
+	"github.com/bhatti/k8-highlander/pkg/workloads/process"
+	"github.com/bhatti/k8-highlander/pkg/workloads/service"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -59,13 +63,43 @@ import (
 	"time"
 )
 
+// WorkloadManager defines an interface for workload specific manager.
+type WorkloadManager interface {
+	// Start initializes the manager and starts all registered workloads.
+	Start(ctx context.Context) error
+
+	// Stop gracefully terminates all managed Process workloads, ensuring proper cleanup of resources.
+	Stop(ctx context.Context) error
+
+	// GetStatus returns the status of the manager
+	GetStatus() common.WorkloadStatus
+
+	// GetName returns the name of the workload
+	GetName() string
+
+	// GetType returns the type of the workload
+	GetType() common.WorkloadType
+
+	// AddWorkload adds a workload from the manager
+	AddWorkload(config any) error
+
+	// RemoveWorkload removes a workload from the manager
+	RemoveWorkload(name string) error
+
+	// GetWorkload finds a workload from the manager
+	GetWorkload(name string) (common.Workload, bool)
+
+	// GetWorkloadsWithCRD returns all workloads from the manager
+	GetWorkloadsWithCRD() []common.Workload
+}
+
 // Manager defines the interface for managing workloads in k8-highlander.
 // It provides methods for starting, stopping, adding, removing, and querying
 // workloads of various types. This interface allows for different implementations
 // of workload management while maintaining a consistent API.
 type Manager interface {
 	// StartAll starts all workloads
-	StartAll(ctx context.Context, client kubernetes.Interface) error
+	StartAll(ctx context.Context) error
 
 	// StopAll stops all workloads
 	StopAll(ctx context.Context) error
@@ -85,12 +119,21 @@ type Manager interface {
 	// GetAllStatuses gets the status of all workloads
 	GetAllStatuses() map[string]common.WorkloadStatus
 
+	// GetWorkloadManagers returns underlying workload managers
+	GetWorkloadManagers() []WorkloadManager
+
+	// GetWorkloadManager returns underlying workload manager by type
+	GetWorkloadManager(workloadType common.WorkloadType) WorkloadManager
+
 	// Cleanup performs cleanup when the manager is being shut down
 	Cleanup()
 }
 
+var _ Manager = &ManagerImpl{}
+
 // ManagerImpl implements the Manager interface
 type ManagerImpl struct {
+	namespace        string
 	workloads        map[string]common.Workload
 	workloadMutex    sync.RWMutex
 	metrics          *monitoring.ControllerMetrics
@@ -128,7 +171,7 @@ func NewManager(metrics *monitoring.ControllerMetrics,
 }
 
 // StartAll starts all workloads
-func (m *ManagerImpl) StartAll(ctx context.Context, client kubernetes.Interface) error {
+func (m *ManagerImpl) StartAll(ctx context.Context) error {
 	m.shutdownMutex.Lock()
 	m.isShuttingDown = false
 	m.shutdownMutex.Unlock()
@@ -145,7 +188,7 @@ func (m *ManagerImpl) StartAll(ctx context.Context, client kubernetes.Interface)
 	m.failedMutex.Unlock()
 
 	// Start the retry background process if not already running
-	go m.retryFailedWorkloads(client)
+	go m.retryFailedWorkloads()
 
 	for name, workload := range m.workloads {
 		wg.Add(1)
@@ -153,7 +196,7 @@ func (m *ManagerImpl) StartAll(ctx context.Context, client kubernetes.Interface)
 			defer wg.Done()
 
 			startTime := time.Now()
-			err := w.Start(ctx, client)
+			err := w.Start(ctx)
 			duration := time.Since(startTime)
 
 			if m.metrics != nil {
@@ -372,7 +415,7 @@ func RetryKubernetesOperation(operation func() error) error {
 }
 
 // retryFailedWorkloads periodically retries failed workloads
-func (m *ManagerImpl) retryFailedWorkloads(client kubernetes.Interface) {
+func (m *ManagerImpl) retryFailedWorkloads() {
 	// Use exponential backoff for retries
 	initialBackoff := 5 * time.Second
 	maxBackoff := 5 * time.Minute
@@ -428,7 +471,7 @@ func (m *ManagerImpl) retryFailedWorkloads(client kubernetes.Interface) {
 
 				// Attempt to start the workload
 				startTime := time.Now()
-				err := info.workload.Start(retryCtx, client)
+				err := info.workload.Start(retryCtx)
 				duration := time.Since(startTime)
 
 				// Record metrics
@@ -474,4 +517,98 @@ func (m *ManagerImpl) retryFailedWorkloads(client kubernetes.Interface) {
 			}
 		}
 	}
+}
+
+func (m *ManagerImpl) GetWorkloadManagers() (res []WorkloadManager) {
+	workloads := m.GetAllWorkloads()
+	for _, workload := range workloads {
+		if mgr, ok := workload.(WorkloadManager); ok {
+			res = append(res, mgr)
+		}
+	}
+	return
+}
+
+func (m *ManagerImpl) GetWorkloadManager(workloadType common.WorkloadType) WorkloadManager {
+	managers := m.GetWorkloadManagers()
+	for _, mgr := range managers {
+		if mgr.GetType() == workloadType {
+			return mgr
+		}
+	}
+	return nil
+}
+
+// InitializeWorkloadManagers creates and configures all workload managers for
+// different types of workloads (processes, cron jobs, services, persistent sets).
+// It registers each manager with the main workload manager.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - k8sClient: Kubernetes client interface
+//   - cfg: Application configuration with workload definitions
+//   - metrics: Metrics collector for the controller
+//   - monitoringServer: Monitoring server for status reporting
+//
+// Returns:
+//   - workloads.Manager: Configured workload manager with all workload types registered
+//   - error: Error if any workload manager fails to initialize
+func InitializeWorkloadManagers(_ context.Context, client kubernetes.Interface, cfg *common.AppConfig,
+	metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) (Manager, error) {
+	// Create workload manager
+	manager := NewManager(metrics, monitoringServer)
+
+	// Add Process manager with processes from config
+	processManager := process.NewProcessManager(cfg.Namespace, "", metrics, monitoringServer, client)
+	for _, processConfig := range cfg.Workloads.Processes {
+		if err := processManager.AddProcess(processConfig); err != nil {
+			klog.Errorf("Failed to add process %s: %v", processConfig.Name, err)
+		} else {
+			klog.Infof("Added process %s", processConfig.Name)
+		}
+	}
+	if err := manager.AddWorkload(processManager); err != nil {
+		return nil, err
+	}
+
+	// Add CronJob manager with cron jobs from config
+	cronJobManager := cronjob.NewCronJobManager(cfg.Namespace, "", metrics, monitoringServer, client)
+	for _, cronJobConfig := range cfg.Workloads.CronJobs {
+		if err := cronJobManager.AddCronJob(cronJobConfig); err != nil {
+			klog.Errorf("Failed to add cron job %s: %v", cronJobConfig.Name, err)
+		} else {
+			klog.Infof("Added cron job %s", cronJobConfig.Name)
+		}
+	}
+	if err := manager.AddWorkload(cronJobManager); err != nil {
+		return nil, err
+	}
+
+	// Add Deployment manager with deployments from config
+	deploymentManager := service.NewDeploymentManager(cfg.Namespace, "", metrics, monitoringServer, client)
+	for _, deploymentConfig := range cfg.Workloads.Services {
+		if err := deploymentManager.AddDeployment(deploymentConfig); err != nil {
+			klog.Errorf("Failed to add deployment %s: %v", deploymentConfig.Name, err)
+		} else {
+			klog.Infof("Added deployment %s", deploymentConfig.Name)
+		}
+	}
+	if err := manager.AddWorkload(deploymentManager); err != nil {
+		return nil, err
+	}
+
+	// Add StatefulSet manager with stateful sets from config
+	statefulSetManager := persistent.NewPersistentManager(cfg.Namespace, "", metrics, monitoringServer, client)
+	for _, statefulSetConfig := range cfg.Workloads.PersistentSets {
+		if err := statefulSetManager.AddStatefulSet(statefulSetConfig); err != nil {
+			klog.Errorf("Failed to add persistent set %s: %v", statefulSetConfig.Name, err)
+		} else {
+			klog.Infof("Added persistent set %s", statefulSetConfig.Name)
+		}
+	}
+	if err := manager.AddWorkload(statefulSetManager); err != nil {
+		return nil, err
+	}
+
+	return manager, nil
 }

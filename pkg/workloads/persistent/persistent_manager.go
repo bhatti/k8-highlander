@@ -45,6 +45,7 @@ import (
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -52,6 +53,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
+
+// var _ workloads.WorkloadManager = &PersistentManager{}
 
 // PersistentManager manages multiple StatefulSet workloads as a single logical unit.
 // It provides coordinated lifecycle management and status aggregation for all
@@ -70,16 +73,17 @@ type PersistentManager struct {
 
 // NewPersistentManager creates a new persistent set manager
 func NewPersistentManager(namespace, configDir string, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) *PersistentManager {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) *PersistentManager {
 	return &PersistentManager{
 		namespace:        namespace,
 		persistentSets:   make(map[string]*PersistentWorkload),
 		configDir:        configDir,
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    "persistent",
-			Type:    common.WorkloadTypeCustom,
+			Type:    common.WorkloadTypePersistentManager,
 			Active:  false,
 			Healthy: true,
 			Details: make(map[string]interface{}),
@@ -88,9 +92,7 @@ func NewPersistentManager(namespace, configDir string, metrics *monitoring.Contr
 }
 
 // Start starts the persistent set manager
-func (m *PersistentManager) Start(ctx context.Context, client kubernetes.Interface) error {
-	m.client = client
-
+func (m *PersistentManager) Start(ctx context.Context) error {
 	// Load persistent set configurations
 	if err := m.loadStatefulSetConfigs(); err != nil {
 		return common.NewSevereError("PersistentManager", "failed to load persistent set configs", err)
@@ -101,7 +103,7 @@ func (m *PersistentManager) Start(ctx context.Context, client kubernetes.Interfa
 	defer m.persistentSetMutex.RUnlock()
 
 	for _, persistentSet := range m.persistentSets {
-		if err := persistentSet.Start(ctx, client); err != nil {
+		if err := persistentSet.Start(ctx); err != nil {
 			klog.Errorf("Failed to start persistent set %s: %v", persistentSet.GetName(), err)
 		}
 	}
@@ -165,7 +167,7 @@ func (m *PersistentManager) GetName() string {
 
 // GetType returns the type of the workload
 func (m *PersistentManager) GetType() common.WorkloadType {
-	return common.WorkloadTypeCustom
+	return common.WorkloadTypePersistentManager
 }
 
 // loadStatefulSetConfigs loads persistent set configurations from files
@@ -228,7 +230,7 @@ func (m *PersistentManager) loadStatefulSetConfigFile(configFile string) error {
 		}
 
 		// Create the persistent set workload
-		persistentSet, err := NewPersistentWorkload(config, m.metrics, m.monitoringServer)
+		persistentSet, err := NewPersistentWorkload(config, m.metrics, m.monitoringServer, m.client)
 		if err != nil {
 			return err
 		}
@@ -238,6 +240,15 @@ func (m *PersistentManager) loadStatefulSetConfigFile(configFile string) error {
 	}
 
 	return nil
+}
+
+// AddWorkload adds a process to the manager
+func (m *PersistentManager) AddWorkload(config any) error {
+	if persistentConfig, ok := config.(common.PersistentConfig); ok {
+		return m.AddStatefulSet(persistentConfig)
+	}
+	return common.NewSevereErrorMessage("PersistentManager", fmt.Sprintf(
+		"invalid config type: %s", reflect.TypeOf(config).String()))
 }
 
 // AddStatefulSet adds a persistent set to the manager
@@ -258,7 +269,7 @@ func (m *PersistentManager) AddStatefulSet(config common.PersistentConfig) error
 	}
 
 	// Create the persistent set workload
-	persistentSet, err := NewPersistentWorkload(config, m.metrics, m.monitoringServer)
+	persistentSet, err := NewPersistentWorkload(config, m.metrics, m.monitoringServer, m.client)
 	if err != nil {
 		return err
 	}
@@ -266,7 +277,7 @@ func (m *PersistentManager) AddStatefulSet(config common.PersistentConfig) error
 
 	// Start the persistent set if client is available
 	if m.client != nil {
-		if err := persistentSet.Start(context.Background(), m.client); err != nil {
+		if err := persistentSet.Start(context.Background()); err != nil {
 			return fmt.Errorf("failed to start persistent set: %w", err)
 		}
 	}
@@ -274,8 +285,8 @@ func (m *PersistentManager) AddStatefulSet(config common.PersistentConfig) error
 	return nil
 }
 
-// RemoveStatefulSet removes a persistent set from the manager
-func (m *PersistentManager) RemoveStatefulSet(name string) error {
+// RemoveWorkload removes a persistent set from the manager
+func (m *PersistentManager) RemoveWorkload(name string) error {
 	m.persistentSetMutex.Lock()
 	defer m.persistentSetMutex.Unlock()
 
@@ -293,6 +304,49 @@ func (m *PersistentManager) RemoveStatefulSet(name string) error {
 
 	delete(m.persistentSets, name)
 	return nil
+}
+
+// GetWorkloadsWithCRD returns all workloads from the manager with CRD
+func (m *PersistentManager) GetWorkloadsWithCRD() (res []common.Workload) {
+	m.persistentSetMutex.RLock()
+	defer m.persistentSetMutex.RUnlock()
+	for _, w := range m.persistentSets {
+		if w.config.WorkloadCRDRef != nil {
+			res = append(res, w)
+		}
+	}
+	return
+}
+
+// GetWorkload finds a persistent set from the manager
+func (m *PersistentManager) GetWorkload(name string) (common.Workload, bool) {
+	m.persistentSetMutex.RLock()
+	defer m.persistentSetMutex.RUnlock()
+
+	persistentSet, exists := m.persistentSets[name]
+	if !exists {
+		return nil, exists
+	}
+
+	return persistentSet, true
+}
+
+// GetWorkloadConfig finds a persistent set config from the manager
+func (m *PersistentManager) GetWorkloadConfig(name string) (cfg common.BaseWorkloadConfig, ok bool) {
+	m.persistentSetMutex.RLock()
+	defer m.persistentSetMutex.RUnlock()
+
+	persistentSet, exists := m.persistentSets[name]
+	if !exists {
+		return cfg, exists
+	}
+
+	return persistentSet.config.BaseWorkloadConfig, true
+}
+
+// GetConfig returns a workload info
+func (m *PersistentManager) GetConfig() common.BaseWorkloadConfig {
+	return common.BaseWorkloadConfig{}
 }
 
 // updateStatus updates the workload status

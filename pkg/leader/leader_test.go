@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,20 +53,12 @@ const (
 	RealMode TestMode = "real"
 )
 
-// StorageType determines which storage implementation to use
-type StorageType string
-
-const (
-	RedisStorage StorageType = "redis"
-	DBStorage    StorageType = "db"
-)
-
 // TestEnv encapsulates the test environment
 type TestEnv struct {
 	t               *testing.T
 	namespace       string
 	mode            TestMode
-	storageType     StorageType
+	storageType     common.StorageType
 	redisServer     *miniredis.Miniredis
 	redisClient     *redis.Client
 	dbClient        *gorm.DB
@@ -103,11 +97,34 @@ func (e *TestEnv) GetClient() kubernetes.Interface {
 	return e.cluster.GetClient()
 }
 
-func (e *TestEnv) SetClient(client kubernetes.Interface) {
-	e.cluster.SetClient(client)
+func (e *TestEnv) GetDynamicClient() dynamic.Interface {
+	return e.cluster.GetDynamicClient()
 }
 
-func (m *MockWorkloadManager) StartAll(ctx context.Context, client kubernetes.Interface) error {
+func (e *TestEnv) SetClient(client kubernetes.Interface, dynamicClient dynamic.Interface) {
+	e.cluster.SetClient(client, dynamicClient)
+}
+
+func (m *MockWorkloadManager) GetWorkloadManagers() (res []workloads.WorkloadManager) {
+	for _, workload := range m.GetAllWorkloads() {
+		if mgr, ok := workload.(workloads.WorkloadManager); ok {
+			res = append(res, mgr)
+		}
+	}
+	return
+}
+
+func (m *MockWorkloadManager) GetWorkloadManager(workloadType common.WorkloadType) workloads.WorkloadManager {
+	managers := m.GetWorkloadManagers()
+	for _, mgr := range managers {
+		if mgr.GetType() == workloadType {
+			return mgr
+		}
+	}
+	return nil
+}
+
+func (m *MockWorkloadManager) StartAll(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -116,7 +133,7 @@ func (m *MockWorkloadManager) StartAll(ctx context.Context, client kubernetes.In
 
 	// Start all workloads
 	for _, workload := range m.workloads {
-		if err := workload.Start(ctx, client); err != nil {
+		if err := workload.Start(ctx); err != nil {
 			return err
 		}
 	}
@@ -213,6 +230,7 @@ func (m *MockWorkloadManager) SetStopError(err error) {
 // MockWorkload is a mock implementation of workloads.Workload
 type MockWorkload struct {
 	name    string
+	config  common.BaseWorkloadConfig
 	wtype   common.WorkloadType
 	status  common.WorkloadStatus
 	started bool
@@ -222,7 +240,10 @@ type MockWorkload struct {
 
 func NewMockWorkload(name string, wtype common.WorkloadType) *MockWorkload {
 	return &MockWorkload{
-		name:  name,
+		name: name,
+		config: common.BaseWorkloadConfig{
+			Name: name,
+		},
 		wtype: wtype,
 		status: common.WorkloadStatus{
 			Name:    name,
@@ -235,7 +256,7 @@ func NewMockWorkload(name string, wtype common.WorkloadType) *MockWorkload {
 	}
 }
 
-func (w *MockWorkload) Start(context.Context, kubernetes.Interface) error {
+func (w *MockWorkload) Start(context.Context) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
@@ -270,6 +291,10 @@ func (w *MockWorkload) GetStatus() common.WorkloadStatus {
 	return status
 }
 
+func (w *MockWorkload) GetConfig() common.BaseWorkloadConfig {
+	return w.config
+}
+
 func (w *MockWorkload) GetName() string {
 	return w.name
 }
@@ -295,13 +320,14 @@ func (w *MockWorkload) IsStopped() bool {
 // NewTestEnv creates a new test environment
 func NewTestEnv(t *testing.T, namespace string) *TestEnv {
 	mode := MockMode
+	storageType := common.StorageTypeMemory
 	if os.Getenv("HIGHLANDER_TEST_MODE") == "real" {
 		mode = RealMode
-	}
-
-	storageType := RedisStorage
-	if os.Getenv("HIGHLANDER_STORAGE_TYPE") == "db" {
-		storageType = DBStorage
+		if os.Getenv("HIGHLANDER_STORAGE_TYPE") == "db" {
+			storageType = common.StorageTypeDB
+		} else {
+			storageType = common.StorageTypeRedis
+		}
 	}
 
 	if namespace == "" {
@@ -323,21 +349,15 @@ func NewTestEnv(t *testing.T, namespace string) *TestEnv {
 	}
 
 	// Setup storage
-	if storageType == RedisStorage {
+	if storageType == common.StorageTypeRedis {
 		env.setupRedisStorage()
-	} else {
+	} else if storageType == common.StorageTypeDB {
 		env.setupDBStorage()
+	} else {
+		env.leaderStorage = storage.NewInMemoryStorage()
 	}
 
-	// Setup metrics and monitoring
-	reg := prometheus.NewRegistry()
-
-	env.metrics = monitoring.NewControllerMetrics(reg)
-	env.monitorServer = monitoring.NewMonitoringServer(
-		env.metrics,
-		"test-version",
-		"test-build",
-	)
+	env.buildMonitoringServer()
 
 	// Add some mock workloads
 	mockProcess := NewMockWorkload("test-process", common.WorkloadTypeProcess)
@@ -583,6 +603,17 @@ func (e *TestEnv) setupDBStorage() {
 	e.leaderStorage = dbStorage
 }
 
+func (e *TestEnv) buildMonitoringServer() {
+	// Setup metrics and monitoring
+	reg := prometheus.NewRegistry()
+	e.metrics = monitoring.NewControllerMetrics(reg)
+	e.monitorServer = monitoring.NewMonitoringServer(
+		e.metrics,
+		"test-version",
+		"test-build",
+	)
+}
+
 // setupClusters sets up the test clusters
 func (e *TestEnv) setupClusters() {
 	if e.mode == MockMode {
@@ -590,7 +621,7 @@ func (e *TestEnv) setupClusters() {
 		e.cluster = common.ClusterConfig{
 			Name: "primary",
 		}
-		e.SetClient(fake.NewSimpleClientset())
+		e.SetClient(fake.NewClientset(), dynamicfake.NewSimpleDynamicClient(common.CreateTestScheme()))
 
 		// Add some nodes to the fake clusters
 		for j := 0; j < 3; j++ {
@@ -616,7 +647,7 @@ func (e *TestEnv) initializeRealClusters() (cluster common.ClusterConfig) {
 	mock := common.ClusterConfig{
 		Name: "mock-primary",
 	}
-	mock.SetClient(fake.NewSimpleClientset())
+	mock.SetClient(fake.NewClientset(), dynamicfake.NewSimpleDynamicClient(common.CreateTestScheme()))
 	// Check for kubeconfig files in environment variables
 	primaryKubeconfig := os.Getenv("PRIMARY_KUBECONFIG")
 	secondaryKubeconfig := os.Getenv("SECONDARY_KUBECONFIG")
@@ -655,8 +686,8 @@ func (e *TestEnv) initializeRealClusters() (cluster common.ClusterConfig) {
 		klog.Fatalf("Error creating kubernetes client for %s cluster: %s", cluster.Name, err.Error())
 		return mock
 	}
-
-	cluster.SetClient(clientset)
+	mockDynamicClient := dynamicfake.NewSimpleDynamicClient(common.CreateTestScheme())
+	cluster.SetClient(clientset, mockDynamicClient)
 
 	// Verify connection by listing nodes
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -685,7 +716,7 @@ func (e *TestEnv) CreateController(id string, tenant string) *LeaderController {
 	var workloadMgr workloads.Manager
 	if e.mode == RealMode && os.Getenv("USE_REAL_WORKLOADS") == "true" {
 		// Create a real workload manager for integration testing
-		workloadMgr = e.createRealWorkloadManager(e.GetClient())
+		workloadMgr = e.createRealWorkloadManager()
 		e.t.Log("Using real workload manager")
 	} else {
 		// Use the mock workload manager for unit testing
@@ -702,15 +733,16 @@ func (e *TestEnv) CreateController(id string, tenant string) *LeaderController {
 		e.monitorServer,
 		workloadMgr,
 		tenant,
+		false,
 	)
 
 	e.controllers[id] = controller
 	return controller
 }
 
-func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Manager {
+func (e *TestEnv) createRealWorkloadManager() workloads.Manager {
 	// Create a real workload manager
-	manager := e.NewManager()
+	manager, _ := e.NewManager(false)
 
 	// Add a simple singleton process workload that just echoes messages
 	processConfig := common.ProcessConfig{
@@ -749,7 +781,7 @@ func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Mana
 	}
 
 	// Create the process workload
-	processWorkload, err := process.NewProcessWorkload(processConfig, e.metrics, e.monitorServer)
+	processWorkload, err := process.NewProcessWorkload(processConfig, e.metrics, e.monitorServer, e.cluster.GetClient())
 	if err != nil {
 		e.t.Logf("Failed to create singleton process workload: %v", err)
 		return manager
@@ -795,7 +827,7 @@ func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Mana
 	}
 
 	// Create the cron job workload
-	cronJobWorkload, err := cronjob.NewCronJobWorkload(cronJobConfig, e.metrics, e.monitorServer)
+	cronJobWorkload, err := cronjob.NewCronJobWorkload(cronJobConfig, e.metrics, e.monitorServer, e.cluster.GetClient())
 	if err != nil {
 		e.t.Logf("Failed to create singleton cron job workload: %v", err)
 		return manager
@@ -813,7 +845,7 @@ func (e *TestEnv) createRealWorkloadManager(kubernetes.Interface) workloads.Mana
 }
 
 func (e *TestEnv) cleanupStorageKeys() {
-	if e.storageType == RedisStorage && e.redisClient != nil {
+	if e.storageType == common.StorageTypeRedis && e.redisClient != nil {
 		ctx := context.Background()
 
 		// Find and delete all test-related keys
@@ -830,7 +862,7 @@ func (e *TestEnv) cleanupStorageKeys() {
 				e.redisClient.Del(ctx, key)
 			}
 		}
-	} else if e.storageType == DBStorage && e.dbClient != nil {
+	} else if e.storageType == common.StorageTypeDB && e.dbClient != nil {
 		// Clean up database tables
 		e.dbClient.Exec("DELETE FROM leader_locks")
 	}
@@ -907,8 +939,14 @@ func (e *TestEnv) LogPods() {
 }
 
 // Cleanup cleans up the test environment
-func (e *TestEnv) NewManager() workloads.Manager {
-	return workloads.NewManager(e.metrics, e.monitorServer)
+func (e *TestEnv) NewManager(mock bool) (workloads.Manager, error) {
+	if mock {
+		mockK8sClient := fake.NewClientset()
+		return workloads.InitializeWorkloadManagers(context.Background(), mockK8sClient, &common.AppConfig{},
+			e.metrics, e.monitorServer)
+	} else {
+		return workloads.NewManager(e.metrics, e.monitorServer), nil
+	}
 }
 
 // Cleanup cleans up the test environment
@@ -1294,6 +1332,8 @@ func TestWorkloadFailover(t *testing.T) {
 	})
 	require.True(t, success, "Controller 1 should become leader")
 
+	time.Sleep(100 * time.Millisecond)
+
 	// In real mode, we might not be able to track start calls with the mock
 	if env.mode == MockMode {
 		require.Equal(t, 1, env.mockWorkloadMgr.GetStartCalls(), "Workloads should be started on controller 1")
@@ -1501,6 +1541,7 @@ func TestLeaderFailoverWithWorkloads(t *testing.T) {
 		env.monitorServer,
 		workloadMgr1,
 		"failover-test",
+		false,
 	)
 
 	controller2 := NewLeaderController(
@@ -1511,6 +1552,7 @@ func TestLeaderFailoverWithWorkloads(t *testing.T) {
 		env.monitorServer,
 		workloadMgr2,
 		"failover-test",
+		false,
 	)
 
 	// Start both controllers
@@ -1665,7 +1707,7 @@ func TestLeaderLockExpiration(t *testing.T) {
 	require.True(t, success, "Controller 1 should become leader")
 
 	// Log the current lock status
-	if env.storageType == RedisStorage && env.redisClient != nil {
+	if env.storageType == common.StorageTypeRedis && env.redisClient != nil {
 		lockKey := fmt.Sprintf("highlander-leader-lock:%s", "tenant")
 		val, err := env.redisClient.Get(ctx, lockKey).Result()
 		if err != nil {
@@ -1701,7 +1743,7 @@ func TestLeaderLockExpiration(t *testing.T) {
 			// Fast forward time in miniredis to expire the key
 			t.Logf("Fast forwarding time in miniredis to expire the lock")
 			env.redisServer.FastForward(LockTTL + 1*time.Second)
-		} else if env.storageType == DBStorage && env.dbClient != nil {
+		} else if env.storageType == common.StorageTypeDB && env.dbClient != nil {
 			// For DB storage in mock mode, we need to delete the record
 			t.Logf("Manually expiring the lock in the mock database")
 			env.dbClient.Exec("DELETE FROM leader_locks WHERE key = ?", lockKey)
@@ -1713,13 +1755,13 @@ func TestLeaderLockExpiration(t *testing.T) {
 	t.Log("Waiting for controller 2 to become leader after lock expiration")
 
 	// Calculate how long we should wait based on the TTL
-	waitTime := LockTTL * 2 // Wait for twice the TTL to be safe
+	waitTime := LockTTL*2 + 100*time.Millisecond // Wait for twice the TTL to be safe
 
 	success = waitForCondition(waitTime, func() bool {
 		isLeader := controller2.IsLeader()
 
 		// Log the current status but don't modify anything
-		if !isLeader && env.mode == RealMode && env.storageType == RedisStorage && env.redisClient != nil {
+		if !isLeader && env.mode == RealMode && env.storageType == common.StorageTypeRedis && env.redisClient != nil {
 			lockKey := fmt.Sprintf("highlander-leader-lock:%s", "tenant")
 			val, err := env.redisClient.Get(ctx, lockKey).Result()
 			if err != nil && !ierrors.Is(err, redis.Nil) {
@@ -1743,7 +1785,7 @@ func TestLeaderLockExpiration(t *testing.T) {
 			t.Logf("Check your Redis configuration to ensure keys are being expired properly")
 
 			// Log the final lock status
-			if env.storageType == RedisStorage && env.redisClient != nil {
+			if env.storageType == common.StorageTypeRedis && env.redisClient != nil {
 				lockKey := fmt.Sprintf("highlander-leader-lock:%s", "tenant")
 				val, err := env.redisClient.Get(ctx, lockKey).Result()
 				if err != nil && !ierrors.Is(err, redis.Nil) {
@@ -1798,7 +1840,8 @@ func TestClusterHealthCheck(t *testing.T) {
 
 	// Now simulate an unhealthy cluster by replacing the client with a broken one
 	originalClient := env.GetClient()
-	env.SetClient(nil)
+	originalDynamicClient := env.GetDynamicClient()
+	env.SetClient(nil, nil)
 
 	// Manually trigger a cluster health check
 	controller.TriggerClusterHealthCheck(ctx)
@@ -1810,7 +1853,7 @@ func TestClusterHealthCheck(t *testing.T) {
 	require.True(t, success, "Controller should release leadership due to unhealthy cluster")
 
 	// Restore the original client
-	env.SetClient(originalClient)
+	env.SetClient(originalClient, originalDynamicClient)
 
 	// Stop the controller
 	err = controller.Stop(ctx)
@@ -1832,7 +1875,7 @@ func TestRealWorkloads(t *testing.T) {
 	defer cancel()
 
 	// Create a real workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, _ := env.NewManager(false)
 
 	// Add a simple process workload
 	processConfig := common.ProcessConfig{
@@ -1863,7 +1906,7 @@ func TestRealWorkloads(t *testing.T) {
 	}
 
 	// Create a process workload
-	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
@@ -1877,6 +1920,7 @@ func TestRealWorkloads(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// Start the controller
@@ -1951,7 +1995,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 	defer cancel()
 
 	// Create a real workload manager instead of the mock
-	workloadMgr := env.NewManager()
+	workloadMgr, _ := env.NewManager(false)
 
 	// Use the test namespace instead of "default"
 	t.Logf("Using namespace: %s", env.namespace)
@@ -1984,7 +2028,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 			RestartPolicy: "Never",
 		},
 	}
-	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
@@ -2015,7 +2059,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 			RestartPolicy: "OnFailure",
 		},
 	}
-	cronJobWorkload, err := cronjob.NewCronJobWorkload(cronJobConfig, env.metrics, env.monitorServer)
+	cronJobWorkload, err := cronjob.NewCronJobWorkload(cronJobConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(cronJobWorkload)
 	require.NoError(t, err)
@@ -2045,7 +2089,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 			},
 		},
 	}
-	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer)
+	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(deploymentWorkload)
 	require.NoError(t, err)
@@ -2059,6 +2103,7 @@ func TestAddingDifferentWorkloadTypes(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// Start the controller
@@ -2381,13 +2426,12 @@ func TestProcessManagerWithMultipleProcesses(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a process manager
-	processManager := process.NewProcessManager(env.namespace, tempDir, env.metrics, env.monitorServer)
+	processManager := process.NewProcessManager(env.namespace, tempDir, env.metrics, env.monitorServer, env.cluster.GetClient())
 	t.Logf("Created process manager with config dir: %s", tempDir)
 	t.Logf("Config file path: %s", configFile)
 
 	// Create a workload manager and add the process manager
-	workloadMgr := env.NewManager()
-	err = workloadMgr.AddWorkload(processManager)
+	workloadMgr, err := env.NewManager(true)
 	require.NoError(t, err)
 
 	// Create a controller with our workload manager
@@ -2399,6 +2443,7 @@ func TestProcessManagerWithMultipleProcesses(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// After starting the controller
@@ -2476,8 +2521,8 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 	defer cancel()
 
 	// Create workload managers for each controller
-	workloadMgr1 := env.NewManager()
-	workloadMgr2 := env.NewManager()
+	workloadMgr1, _ := env.NewManager(false)
+	workloadMgr2, _ := env.NewManager(false)
 
 	// Add a simple process workload to both managers
 	processConfig := common.ProcessConfig{
@@ -2507,12 +2552,12 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 		},
 	}
 
-	processWorkload1, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload1, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr1.AddWorkload(processWorkload1)
 	require.NoError(t, err)
 
-	processWorkload2, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload2, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr2.AddWorkload(processWorkload2)
 	require.NoError(t, err)
@@ -2526,6 +2571,7 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 		env.monitorServer,
 		workloadMgr1,
 		"failover-test",
+		false,
 	)
 
 	controller2 := NewLeaderController(
@@ -2536,6 +2582,7 @@ func TestLeaderFailoverWithRealWorkloads(t *testing.T) {
 		env.monitorServer,
 		workloadMgr2,
 		"failover-test",
+		false,
 	)
 
 	// Start both controllers
@@ -2659,15 +2706,15 @@ func TestRealWorldScenario(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create a workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, _ := env.NewManager(false)
 
 	// Add a process manager
-	processManager := process.NewProcessManager(env.namespace, tempDir, env.metrics, env.monitorServer)
+	processManager := process.NewProcessManager(env.namespace, tempDir, env.metrics, env.monitorServer, env.cluster.GetClient())
 	err = workloadMgr.AddWorkload(processManager)
 	require.NoError(t, err)
 
 	// Add a cronjob manager
-	cronJobManager := cronjob.NewCronJobManager(env.namespace, tempDir, env.metrics, env.monitorServer)
+	cronJobManager := cronjob.NewCronJobManager(env.namespace, tempDir, env.metrics, env.monitorServer, env.cluster.GetClient())
 	err = workloadMgr.AddWorkload(cronJobManager)
 	require.NoError(t, err)
 
@@ -2696,7 +2743,7 @@ func TestRealWorldScenario(t *testing.T) {
 			},
 		},
 	}
-	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer)
+	deploymentWorkload, err := service.NewServiceWorkload(deploymentConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(deploymentWorkload)
 	require.NoError(t, err)
@@ -2710,6 +2757,7 @@ func TestRealWorldScenario(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"production",
+		false,
 	)
 
 	// Start the controller
@@ -2777,7 +2825,7 @@ func TestDockerCommandExecution(t *testing.T) {
 	defer cancel()
 
 	// Create a workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, _ := env.NewManager(false)
 
 	// Add a process workload that runs a Docker container
 	processConfig := common.ProcessConfig{
@@ -2809,7 +2857,7 @@ func TestDockerCommandExecution(t *testing.T) {
 		},
 	}
 
-	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
@@ -2823,6 +2871,7 @@ func TestDockerCommandExecution(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"docker-test",
+		false,
 	)
 
 	// Start the controller
@@ -2879,7 +2928,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 		defer cancel()
 
 		// Create a simple process workload
-		workloadMgr := env.NewManager()
+		workloadMgr, _ := env.NewManager(false)
 		processConfig := common.ProcessConfig{
 			BaseWorkloadConfig: common.BaseWorkloadConfig{
 				TerminationGracePeriod: time.Second * 5,
@@ -2897,7 +2946,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 			},
 		}
 
-		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 		require.NoError(t, err)
 		err = workloadMgr.AddWorkload(processWorkload)
 		require.NoError(t, err)
@@ -2911,6 +2960,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 			env.monitorServer,
 			workloadMgr,
 			"storage-test",
+			false,
 		)
 
 		// Start the controller
@@ -2952,7 +3002,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 		defer cancel()
 
 		// Create a simple process workload
-		workloadMgr := env.NewManager()
+		workloadMgr, _ := env.NewManager(false)
 		processConfig := common.ProcessConfig{
 			BaseWorkloadConfig: common.BaseWorkloadConfig{
 				TerminationGracePeriod: time.Second * 5,
@@ -2970,7 +3020,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 			},
 		}
 
-		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+		processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 		require.NoError(t, err)
 		err = workloadMgr.AddWorkload(processWorkload)
 		require.NoError(t, err)
@@ -2984,6 +3034,7 @@ func TestStorageImplementationComparison(t *testing.T) {
 			env.monitorServer,
 			workloadMgr,
 			"storage-test",
+			false,
 		)
 
 		// Start the controller

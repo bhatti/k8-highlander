@@ -49,7 +49,7 @@ func TestLeaderWithCRDWorkload(t *testing.T) {
 				Shell:    "/bin/sh",
 			},
 			WorkloadCRDRef: &common.WorkloadCRDReference{
-				APIVersion: "highlander.plexobject.io/v1",
+				APIVersion: common.GROUP + "/" + common.MajorVersion,
 				Kind:       "WorkloadProcess",
 				Name:       "test-process-crd",
 				Namespace:  env.namespace,
@@ -58,10 +58,11 @@ func TestLeaderWithCRDWorkload(t *testing.T) {
 	}
 
 	// Create workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, err := env.NewManager(true)
+	require.NoError(t, err)
 
 	// Create process workload and add to manager
-	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr.AddWorkload(processWorkload)
 	require.NoError(t, err)
@@ -75,6 +76,7 @@ func TestLeaderWithCRDWorkload(t *testing.T) {
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// TODO Set up the LoadWorkloadFromCRD function to use our test dynamic client
@@ -148,7 +150,7 @@ func TestLeaderCRDFailover(t *testing.T) {
 				Shell:    "/bin/sh",
 			},
 			WorkloadCRDRef: &common.WorkloadCRDReference{
-				APIVersion: "highlander.plexobject.io/v1",
+				APIVersion: common.GROUP + "/" + common.MajorVersion,
 				Kind:       "WorkloadProcess",
 				Name:       "test-process-crd",
 				Namespace:  env.namespace,
@@ -157,17 +159,17 @@ func TestLeaderCRDFailover(t *testing.T) {
 	}
 
 	// Create workload managers for both controllers
-	workloadMgr1 := env.NewManager()
-	workloadMgr2 := env.NewManager()
+	workloadMgr1, err := env.NewManager(true)
+	workloadMgr2, err := env.NewManager(true)
 
 	// Create process workload for controller 1
-	processWorkload1, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload1, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr1.AddWorkload(processWorkload1)
 	require.NoError(t, err)
 
 	// Create process workload for controller 2
-	processWorkload2, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer)
+	processWorkload2, err := process.NewProcessWorkload(processConfig, env.metrics, env.monitorServer, env.cluster.GetClient())
 	require.NoError(t, err)
 	err = workloadMgr2.AddWorkload(processWorkload2)
 	require.NoError(t, err)
@@ -181,6 +183,7 @@ func TestLeaderCRDFailover(t *testing.T) {
 		env.monitorServer,
 		workloadMgr1,
 		"tenant",
+		false,
 	)
 
 	controller2 := NewLeaderController(
@@ -191,6 +194,7 @@ func TestLeaderCRDFailover(t *testing.T) {
 		env.monitorServer,
 		workloadMgr2,
 		"tenant",
+		false,
 	)
 
 	// TODO Set up the LoadWorkloadFromCRD function to use our test dynamic client
@@ -374,7 +378,8 @@ workloads:
 	require.NoError(t, err)
 
 	// Create workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, err := env.NewManager(true)
+	require.NoError(t, err)
 
 	// Create a controller
 	controller := NewLeaderController(
@@ -385,6 +390,7 @@ workloads:
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// Create AppConfig
@@ -592,7 +598,8 @@ workloads:
 	require.NoError(t, err)
 
 	// Create workload manager
-	workloadMgr := env.NewManager()
+	workloadMgr, err := env.NewManager(true)
+	require.NoError(t, err)
 
 	// Create a controller
 	controller := NewLeaderController(
@@ -603,6 +610,7 @@ workloads:
 		env.monitorServer,
 		workloadMgr,
 		"tenant",
+		false,
 	)
 
 	// Create AppConfig
@@ -692,7 +700,7 @@ workloads:
 func createTestProcessCRD(t *testing.T, client *fake.FakeDynamicClient, namespace string) {
 	processCRD := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "highlander.plexobject.io/v1",
+			"apiVersion": common.GROUP + "/" + common.MajorVersion,
 			"kind":       "WorkloadProcess",
 			"metadata": map[string]interface{}{
 				"name":      "test-process-crd",
@@ -725,9 +733,9 @@ func createTestProcessCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 	}
 
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadprocesses",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.ProcessesResource,
 	}
 
 	_, err := client.Resource(gvr).Namespace(namespace).Create(context.Background(), processCRD, metav1.CreateOptions{})
@@ -737,9 +745,9 @@ func createTestProcessCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 // Helper function to update a process CRD with new values
 func updateTestProcessCRD(t *testing.T, client *fake.FakeDynamicClient, namespace string) {
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadprocesses",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.ProcessesResource,
 	}
 
 	// Get the existing CRD
@@ -769,7 +777,7 @@ func updateTestProcessCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 func createTestCronJobCRD(t *testing.T, client *fake.FakeDynamicClient, namespace string) {
 	cronJobCRD := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "highlander.plexobject.io/v1",
+			"apiVersion": common.GROUP + "/" + common.MajorVersion,
 			"kind":       "WorkloadCronJob",
 			"metadata": map[string]interface{}{
 				"name":      "test-cronjob-crd",
@@ -801,9 +809,9 @@ func createTestCronJobCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 	}
 
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadcronjobs",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.CronjobsResource,
 	}
 
 	_, err := client.Resource(gvr).Namespace(namespace).Create(context.Background(), cronJobCRD, metav1.CreateOptions{})
@@ -814,7 +822,7 @@ func createTestCronJobCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 func createTestServiceCRD(t *testing.T, client *fake.FakeDynamicClient, namespace string) {
 	serviceCRD := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "highlander.plexobject.io/v1",
+			"apiVersion": common.GROUP + "/" + common.MajorVersion,
 			"kind":       "WorkloadService",
 			"metadata": map[string]interface{}{
 				"name":      "test-service-crd",
@@ -852,9 +860,9 @@ func createTestServiceCRD(t *testing.T, client *fake.FakeDynamicClient, namespac
 	}
 
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadservices",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.ServicesResource,
 	}
 
 	_, err := client.Resource(gvr).Namespace(namespace).Create(context.Background(), serviceCRD, metav1.CreateOptions{})

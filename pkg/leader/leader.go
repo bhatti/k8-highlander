@@ -62,6 +62,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"math"
 	"reflect"
@@ -98,7 +99,9 @@ type LeaderController struct {
 	metrics          *monitoring.ControllerMetrics
 	monitoringServer *monitoring.MonitoringServer
 	workloadManager  workloads.Manager
+	crdWatcher       *workloads.CRDWatcher
 	leaderLockKey    string
+	remainFollower   bool
 
 	isLeader        bool
 	controllerState common.ControllerState
@@ -131,6 +134,7 @@ func NewLeaderController(
 	monitoringServer *monitoring.MonitoringServer,
 	workloadManager workloads.Manager,
 	tenant string,
+	remainFollower bool,
 ) *LeaderController {
 	// Use default tenant if empty
 	if tenant == "" {
@@ -138,6 +142,16 @@ func NewLeaderController(
 	}
 
 	monitoringServer.UpdateControllerState(common.StateNormal)
+
+	// Create the CRD watcher
+	crdWatcher := workloads.NewCRDWatcher(
+		activeCluster.GetDynamicClient(),
+		activeCluster.GetClient(),
+		workloadManager,
+		metrics,
+		monitoringServer,
+	)
+
 	return &LeaderController{
 		storage:          storage,
 		id:               id,
@@ -145,10 +159,12 @@ func NewLeaderController(
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
 		workloadManager:  workloadManager,
+		crdWatcher:       crdWatcher,
 		leaderLockKey:    fmt.Sprintf(leaderLockKeyFormat, tenant),
 		stopCh:           make(chan struct{}),
 		controllerState:  common.StateNormal,
 		dbFailureCount:   0,
+		remainFollower:   remainFollower,
 	}
 }
 
@@ -207,7 +223,8 @@ func (lc *LeaderController) Start(ctx context.Context) error {
 // Stop gracefully shuts down the leader controller, releasing leadership if held
 // and stopping managed workloads.
 func (lc *LeaderController) Stop(ctx context.Context) error {
-	klog.Infof("Stopping leader controller with ID %s [elapsed %s]", lc.id, common.GetElapsedTime(ctx))
+	klog.Infof("Stopping leader controller with ID %s [elapsed %s] (leader %v)",
+		lc.id, common.GetElapsedTime(ctx), lc.monitoringServer.GetLeaderInfo())
 
 	// Use a mutex to ensure thread safety
 	lc.workloadMutex.Lock()
@@ -221,6 +238,14 @@ func (lc *LeaderController) Stop(ctx context.Context) error {
 	default:
 		// Channel is still open, close it
 		close(lc.stopCh)
+	}
+
+	// Stop the CRD watcher regardless of leader status
+	if lc.crdWatcher != nil {
+		klog.Infof("Stopping CRD watcher %s...", lc.id)
+		if err := lc.crdWatcher.Stop(ctx); err != nil {
+			klog.Errorf("Failed to stop CRD watcher: %v", err)
+		}
 	}
 
 	// If we're the leader, release leadership and stop workloads
@@ -301,6 +326,9 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	//	klog.Infof("Lock info before acquire: value=%s, ttl=%v, version=%d",
 	//		lockInfo.Value, lockInfo.TTL, lockInfo.Version)
 	//}
+	if lc.remainFollower {
+		return false
+	}
 	startTime := time.Now()
 
 	// Get the current leader (if any) before we try to acquire
@@ -1008,23 +1036,35 @@ func (lc *LeaderController) GetClient() kubernetes.Interface {
 	return lc.cluster.GetClient()
 }
 
-func (lc *LeaderController) SetClient(client kubernetes.Interface) {
-	lc.cluster.SetClient(client)
+func (lc *LeaderController) SetClient(client kubernetes.Interface, dynamicClient dynamic.Interface) {
+	lc.cluster.SetClient(client, dynamicClient)
 }
 
 // startWorkloads starts all workloads
 func (lc *LeaderController) startWorkloads() error {
+	klog.Infof("Starting workloads and CRD watcher: %s", lc.id)
+
 	// Start workloads
-	if err := lc.workloadManager.StartAll(lc.workloadCtx, lc.GetClient()); err != nil {
+	if err := lc.workloadManager.StartAll(lc.workloadCtx); err != nil {
 		klog.Errorf("Failed to start workloads: %v", err)
 		lc.monitoringServer.SetError(fmt.Errorf("failed to start workloads: %w", err))
 		return err
 	}
+
+	// Start CRD watcher
+	if lc.crdWatcher != nil {
+		if err := lc.crdWatcher.Start(lc.workloadCtx); err != nil {
+			klog.Errorf("Failed to start CRD watcher: %v", err)
+		}
+	}
+
 	return nil
 }
 
 // stopWorkloads stops all workloads
 func (lc *LeaderController) stopWorkloads() error {
+	klog.Infof("Stopping workloads and CRD watcher: %s", lc.id)
+
 	// Cancel workload context
 	if lc.workloadCancel != nil {
 		lc.workloadCancel()
@@ -1036,6 +1076,13 @@ func (lc *LeaderController) stopWorkloads() error {
 		klog.Errorf("Failed to stop workloads: %v", err)
 		lc.monitoringServer.SetError(fmt.Errorf("failed to stop workloads: %w", err))
 		return err
+	}
+
+	// Stop CRD watcher
+	if lc.crdWatcher != nil {
+		if err := lc.crdWatcher.Stop(context.Background()); err != nil {
+			klog.Errorf("Failed to stop CRD watcher: %v", err)
+		}
 	}
 	return nil
 }
@@ -1104,7 +1151,7 @@ func (lc *LeaderController) monitorWorkloads(ctx context.Context) {
 							klog.Errorf("Failed to stop unhealthy workload %s: %v", name, err)
 						}
 
-						if err := workload.Start(ctx, lc.GetClient()); err != nil {
+						if err := workload.Start(ctx); err != nil {
 							klog.Errorf("Failed to restart workload %s: %v", name, err)
 						}
 
@@ -1195,11 +1242,11 @@ func (lc *LeaderController) checkForOrphanedWorkloads(ctx context.Context) {
 func (lc *LeaderController) restartWorkload(ctx context.Context, name string) {
 	workload, exists := lc.workloadManager.GetWorkload(name)
 	if !exists {
-		klog.Errorf("Workload %s not found in manager", name)
+		klog.Errorf("Workload %s not found in manager for restart (leader %v)", name, lc.monitoringServer.GetLeaderInfo())
 		return
 	}
 
-	klog.Infof("Restarting workload %s", name)
+	klog.Infof("Restarting workload %s (leader %v)", name, lc.monitoringServer.GetLeaderInfo())
 
 	// Stop the workload if it's running
 	if err := workload.Stop(ctx); err != nil {
@@ -1208,11 +1255,11 @@ func (lc *LeaderController) restartWorkload(ctx context.Context, name string) {
 	}
 
 	// Start the workload
-	if err := workload.Start(ctx, lc.GetClient()); err != nil {
+	if err := workload.Start(ctx); err != nil {
 		klog.Errorf("Error starting workload %s: %v", name, err)
 		lc.monitoringServer.SetError(fmt.Errorf("failed to restart workload %s: %w", name, err))
 	} else {
-		klog.Infof("Successfully restarted workload %s", name)
+		klog.Infof("Successfully restarted workload %s (leader %v)", name, lc.monitoringServer.GetLeaderInfo())
 	}
 }
 
@@ -1250,7 +1297,8 @@ func (lc *LeaderController) MarkWorkloadForShutdown(ctx context.Context, pod *co
 		return fmt.Errorf("failed to mark pod %s/%s for shutdown: %w", pod.Namespace, pod.Name, err)
 	}
 
-	klog.Infof("Marked pod %s/%s for controlled shutdown", pod.Namespace, pod.Name)
+	klog.Infof("Marked pod %s/%s for controlled shutdown (leader %v)", pod.Namespace, pod.Name,
+		lc.monitoringServer.GetLeaderInfo())
 	return nil
 }
 

@@ -32,9 +32,9 @@ func (c *CRDClient) FetchWorkloadProcessConfig(ctx context.Context, ref *common.
 
 	// Define the GVR (Group, Version, Resource) for WorkloadProcess
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadprocesses",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.ProcessesResource,
 	}
 
 	// Use namespace from reference or default to current namespace
@@ -61,9 +61,9 @@ func (c *CRDClient) FetchWorkloadServiceConfig(ctx context.Context, ref *common.
 
 	// Define the GVR for WorkloadService
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadservices",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.ServicesResource,
 	}
 
 	// Use namespace from reference or default to current namespace
@@ -90,9 +90,9 @@ func (c *CRDClient) FetchWorkloadCronJobConfig(ctx context.Context, ref *common.
 
 	// Define the GVR for WorkloadCronJob
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadcronjobs",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.CronjobsResource,
 	}
 
 	// Use namespace from reference or default to current namespace
@@ -119,9 +119,9 @@ func (c *CRDClient) FetchWorkloadPersistentConfig(ctx context.Context, ref *comm
 
 	// Define the GVR for WorkloadPersistent
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadpersistents",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
+		Resource: common.PersistentsResource,
 	}
 
 	// Use namespace from reference or default to current namespace
@@ -225,6 +225,12 @@ func convertToProcessConfig(obj *unstructured.Unstructured, name, namespace stri
 		if duration, err := time.ParseDuration(gracePeriod); err == nil {
 			config.GracePeriod = duration
 		}
+	}
+	config.WorkloadCRDRef = &common.WorkloadCRDReference{
+		APIVersion: obj.GetAPIVersion(),
+		Kind:       obj.GetKind(),
+		Name:       obj.GetName(),
+		Namespace:  obj.GetNamespace(),
 	}
 
 	return config, nil
@@ -606,21 +612,21 @@ func (c *CRDClient) UpdateWorkloadStatus(ctx context.Context, ref *common.Worklo
 	var resource string
 	switch ref.Kind {
 	case "WorkloadProcess":
-		resource = "workloadprocesses"
+		resource = common.ProcessesResource
 	case "WorkloadService":
-		resource = "workloadservices"
+		resource = common.ServicesResource
 	case "WorkloadCronJob":
-		resource = "workloadcronjobs"
+		resource = common.CronjobsResource
 	case "WorkloadPersistent":
-		resource = "workloadpersistents"
+		resource = common.PersistentsResource
 	default:
 		return fmt.Errorf("unsupported workload CRD kind: %s", ref.Kind)
 	}
 
 	// Define the GVR for the resource
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
+		Group:    common.GROUP,
+		Version:  common.MajorVersion,
 		Resource: resource,
 	}
 

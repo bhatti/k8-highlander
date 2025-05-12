@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"github.com/oklog/ulid/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,9 +87,12 @@ type ProcessWorkload struct {
 
 // NewProcessWorkload creates a new process workload
 func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) (*ProcessWorkload, error) {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) (*ProcessWorkload, error) {
 	if err := common.ValidationErrors(config.Validate("")); err != nil {
 		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("kubernetes client not specified")
 	}
 	// Set defaults
 	if config.TerminationGracePeriod == 0 {
@@ -97,6 +101,7 @@ func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.Control
 	if config.RestartPolicy == "" {
 		config.RestartPolicy = "Never" // OnFailure - this recreates pod on stop
 	}
+	config.ID = ulid.Make().String()
 
 	return &ProcessWorkload{
 		config:           config,
@@ -105,6 +110,7 @@ func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.Control
 		podName:          fmt.Sprintf("%s-pod", config.Name),
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    config.Name,
 			Type:    common.WorkloadTypeProcess,
@@ -115,13 +121,19 @@ func NewProcessWorkload(config common.ProcessConfig, metrics *monitoring.Control
 	}, nil
 }
 
+func (p *ProcessWorkload) String() string {
+	p.statusMutex.RLock()
+	defer p.statusMutex.RUnlock()
+	return fmt.Sprintf("ProcessWorkload(id=%s, name=%s, active=%v, healthy=%v, image=%s)",
+		p.config.ID, p.config.Name, p.status.Active, p.status.Healthy, p.config.Image)
+}
+
 // Start creates or updates the Pod in Kubernetes and begins monitoring its health.
 // It also sets up a watcher to detect unexpected Pod terminations.
-func (p *ProcessWorkload) Start(ctx context.Context, client kubernetes.Interface) error {
-	klog.V(2).Infof("Starting process workload %s in namespace %s", p.config.Name, p.namespace)
+func (p *ProcessWorkload) Start(ctx context.Context) error {
+	klog.V(2).Infof("Starting process workload %s in namespace %s", p, p.namespace)
 
 	startTime := time.Now()
-	p.client = client
 
 	// Create and start the pod
 	err := p.createOrUpdatePod(ctx)
@@ -138,7 +150,7 @@ func (p *ProcessWorkload) Start(ctx context.Context, client kubernetes.Interface
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to start process workload %s: %v", p.config.Name, err)
+		klog.Errorf("Failed to start process workload %s: %v", p, err)
 
 		return fmt.Errorf("failed to create or update pod: %w", err)
 	}
@@ -150,7 +162,7 @@ func (p *ProcessWorkload) Start(ctx context.Context, client kubernetes.Interface
 	go p.watchPodTerminations(ctx)
 
 	klog.Infof("Successfully started process workload %s in namespace %s [elapsed: %s]",
-		p.config.Name, p.namespace, time.Since(startTime))
+		p, p.namespace, time.Since(startTime))
 
 	return nil
 }
@@ -158,7 +170,7 @@ func (p *ProcessWorkload) Start(ctx context.Context, client kubernetes.Interface
 // Stop gracefully terminates the Pod, adding controlled shutdown annotations
 // and forcing deletion of stuck Pods if necessary.
 func (p *ProcessWorkload) Stop(ctx context.Context) error {
-	klog.V(2).Infof("Stopping process workload %s in namespace %s", p.config.Name, p.namespace)
+	klog.V(2).Infof("Stopping process workload %s in namespace %s", p, p.namespace)
 
 	startTime := time.Now()
 
@@ -169,7 +181,7 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 		select {
 		case <-p.stopCh:
 			// Channel is already closed, create a new one for future use
-			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", p.config.Name)
+			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", p)
 			p.stopCh = make(chan struct{})
 		default:
 			// Channel is still open, close it
@@ -180,6 +192,18 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 	p.statusMutex.Unlock()
 
 	// First, mark the pod for controlled shutdown
+	if p.client == nil {
+		klog.Warningf("Cannot stop workload %s: client not initialized", p)
+
+		// Update status
+		p.updateStatus(func(s *common.WorkloadStatus) {
+			s.Active = false
+			s.Healthy = false
+			s.Details["stoppedAt"] = time.Now()
+		})
+		panic("nil client")
+		return nil
+	}
 	pod, err := p.client.CoreV1().Pods(p.namespace).Get(ctx, p.podName, metav1.GetOptions{})
 	if err == nil {
 		// Pod exists, add shutdown annotation
@@ -264,7 +288,7 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 	}
 
 	if err != nil && !errors.IsNotFound(err) {
-		klog.Errorf("Failed to stop process workload %s: %v [elapsed: %s]", p.config.Name, err, time.Since(startTime))
+		klog.Errorf("Failed to stop process workload %s: %v [elapsed: %s]", p, err, time.Since(startTime))
 		return fmt.Errorf("failed to delete pod: %w", err)
 	}
 
@@ -275,12 +299,18 @@ func (p *ProcessWorkload) Stop(ctx context.Context) error {
 		s.Details["stoppedAt"] = time.Now()
 	})
 
-	klog.Infof("Successfully stopped process workload %s in namespace %s [elapsed: %s]", p.config.Name, p.namespace, time.Since(startTime))
+	klog.Infof("Successfully stopped process workload %s in namespace %s [elapsed: %s]", p, p.namespace, time.Since(startTime))
 
 	return nil
 }
 
-func (p *ProcessWorkload) SetMonitoring(metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) {
+// GetConfig returns a workload info
+func (p *ProcessWorkload) GetConfig() common.BaseWorkloadConfig {
+	return p.config.BaseWorkloadConfig
+}
+
+func (p *ProcessWorkload) SetMonitoring(
+	metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) {
 	p.metrics = metrics
 	p.monitoringServer = monitoringServer
 }
@@ -342,7 +372,7 @@ func (p *ProcessWorkload) watchPodTerminations(ctx context.Context) {
 
 				if !controlledShutdown {
 					klog.Warningf("Pod %s was deleted unexpectedly, recreating %s in namespace %s [%v]", p.podName,
-						p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
+						p, p.namespace, p.monitoringServer.GetLeaderInfo())
 					// Recreate the pod
 					if err := p.createOrUpdatePod(ctx); err != nil {
 						klog.Errorf("Failed to recreate pod %s: %v", p.podName, err)
@@ -350,7 +380,7 @@ func (p *ProcessWorkload) watchPodTerminations(ctx context.Context) {
 				} else {
 					debug.PrintStack()
 					klog.Infof("Pod %s was deleted as part of controlled shutdown %s in namespace %s [%v]", p.podName,
-						p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
+						p, p.namespace, p.monitoringServer.GetLeaderInfo())
 				}
 			}
 		}
@@ -359,8 +389,8 @@ func (p *ProcessWorkload) watchPodTerminations(ctx context.Context) {
 
 // createOrUpdatePod creates or updates the pod for the process
 func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
-	klog.Infof("Creating/updating pod for process %s in namespace %s [%v]",
-		p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
+	klog.Infof("Creating/updating pod for process %s (image %s) in namespace %s [%v]",
+		p, p.config.Image, p.namespace, p.monitoringServer.GetLeaderInfo())
 	startTime := time.Now()
 	// Build the pod
 	pod, err := p.buildPod()
@@ -378,7 +408,7 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 	if errors.IsNotFound(err) {
 		// Create new pod
 		klog.Infof("Pod %s does not exist, creating it %s in namespace %s [%v]", p.podName,
-			p.config.Name, p.namespace, p.monitoringServer.GetLeaderInfo())
+			p, p.namespace, p.monitoringServer.GetLeaderInfo())
 
 		_, err = p.client.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
 		if err != nil {
@@ -387,8 +417,8 @@ func (p *ProcessWorkload) createOrUpdatePod(ctx context.Context) error {
 			return fmt.Errorf("failed to create pod: %w", err)
 		}
 
-		klog.Infof("Created pod %s in namespace %s, %s [elapsed: %s]",
-			p.podName, p.namespace, common.ContainersSummary(pod.Spec.Containers), time.Since(startTime))
+		klog.Infof("Created pod %s (image:%s) in namespace %s, %s [elapsed: %s]",
+			p.podName, p.config.Image, p.namespace, common.ContainersSummary(pod.Spec.Containers), time.Since(startTime))
 	} else {
 		// If pod exists but is in a terminal state, delete it and create a new one
 		if isPodTerminated(existing) {
@@ -475,7 +505,7 @@ func (p *ProcessWorkload) checkHealth(ctx context.Context) error {
 					break
 				}
 			}
-			return false, errorMsg, fmt.Errorf(errorMsg)
+			return false, errorMsg, fmt.Errorf("failed to get pod info: %s", errorMsg)
 		} else if pod.Status.Phase == corev1.PodPending {
 			// Check if pod is still being created (give it more time)
 			for _, condition := range pod.Status.Conditions {

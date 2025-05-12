@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"github.com/oklog/ulid/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -71,6 +72,7 @@ type PersistentWorkload struct {
 	status           common.WorkloadStatus
 	statusMutex      sync.RWMutex
 	stopCh           chan struct{}
+	stopped          bool
 	client           kubernetes.Interface
 	metrics          *monitoring.ControllerMetrics
 	monitoringServer *monitoring.MonitoringServer
@@ -78,10 +80,15 @@ type PersistentWorkload struct {
 
 // NewPersistentWorkload creates a new stateful set workload
 func NewPersistentWorkload(config common.PersistentConfig, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) (*PersistentWorkload, error) {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) (*PersistentWorkload, error) {
 	if err := common.ValidationErrors(config.Validate("")); err != nil {
 		return nil, err
 	}
+	if client == nil {
+		return nil, fmt.Errorf("kubernetes client not specified")
+	}
+	config.ID = ulid.Make().String()
+
 	// Set defaults
 	if config.ReadinessTimeout == 0 {
 		config.ReadinessTimeout = 5 * time.Minute
@@ -95,6 +102,7 @@ func NewPersistentWorkload(config common.PersistentConfig, metrics *monitoring.C
 		stopCh:           make(chan struct{}),
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    config.Name,
 			Type:    common.WorkloadTypePersistent,
@@ -105,13 +113,19 @@ func NewPersistentWorkload(config common.PersistentConfig, metrics *monitoring.C
 	}, nil
 }
 
+func (s *PersistentWorkload) String() string {
+	s.statusMutex.RLock()
+	defer s.statusMutex.RUnlock()
+	return fmt.Sprintf("PersistentWorkload(id=%s, name=%s, active=%v, healthy=%v, image=%s)",
+		s.config.ID, s.config.Name, s.status.Active, s.status.Healthy, s.config.Image)
+}
+
 // Start creates or updates the StatefulSet and associated service in Kubernetes.
 // It also begins health monitoring of the workload.
-func (s *PersistentWorkload) Start(ctx context.Context, client kubernetes.Interface) error {
-	klog.V(2).Infof("Starting persistent workload %s in namespace %s", s.config.Name, s.config.Namespace)
+func (s *PersistentWorkload) Start(ctx context.Context) error {
+	klog.V(2).Infof("Starting persistent workload %s in namespace %s", s, s.config.Namespace)
 
 	startTime := time.Now()
-	s.client = client
 
 	// Create service if needed
 	if len(s.config.Ports) > 0 {
@@ -138,7 +152,7 @@ func (s *PersistentWorkload) Start(ctx context.Context, client kubernetes.Interf
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to start persistent workload %s: %v", s.config.Name, err)
+		klog.Errorf("Failed to start persistent workload %s: %v", s, err)
 
 		return fmt.Errorf("failed to create or update persistent set: %w", err)
 	}
@@ -147,7 +161,7 @@ func (s *PersistentWorkload) Start(ctx context.Context, client kubernetes.Interf
 	go s.monitorHealth(ctx)
 
 	klog.Infof("Successfully started persistent workload %s in namespace %s [elapsed: %s %v]",
-		s.config.Name, s.config.Namespace, time.Since(startTime), s.monitoringServer.GetLeaderInfo())
+		s, s.config.Namespace, time.Since(startTime), s.monitoringServer.GetLeaderInfo())
 
 	return nil
 }
@@ -155,23 +169,23 @@ func (s *PersistentWorkload) Start(ctx context.Context, client kubernetes.Interf
 // Stop gracefully scales down the StatefulSet and waits for termination.
 // It adds controlled shutdown annotations and forces deletion of stuck pods if necessary.
 func (s *PersistentWorkload) Stop(ctx context.Context) error {
-	klog.V(2).Infof("Stopping persistent workload %s in namespace %s", s.config.Name, s.config.Namespace)
+	klog.V(2).Infof("Stopping persistent workload %s in namespace %s", s, s.config.Namespace)
 
 	startTime := time.Now()
 
 	// Use a mutex to safely close the channel only once
 	s.statusMutex.Lock()
-	if s.stopCh != nil {
+	if s.stopCh != nil && !s.stopped {
 		// Check if channel is already closed by trying to read from it
 		select {
 		case <-s.stopCh:
 			// Channel is already closed, create a new one for future use
-			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", s.config.Name)
+			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", s)
 			s.stopCh = make(chan struct{})
 		default:
 			// Channel is still open, close it
 			close(s.stopCh)
-			s.stopCh = nil
+			s.stopped = true
 		}
 	}
 	s.statusMutex.Unlock()
@@ -180,7 +194,7 @@ func (s *PersistentWorkload) Stop(ctx context.Context) error {
 	statefulSet, err := s.client.AppsV1().StatefulSets(s.config.Namespace).Get(ctx, s.config.Name, metav1.GetOptions{})
 	if err == nil {
 		// StatefulSet exists, add shutdown annotation
-		klog.Infof("Marking StatefulSet %s for controlled shutdown", s.config.Name)
+		klog.Infof("Marking StatefulSet %s for controlled shutdown", s)
 		statefulSetCopy := statefulSet.DeepCopy()
 		if statefulSetCopy.Annotations == nil {
 			statefulSetCopy.Annotations = make(map[string]string)
@@ -188,7 +202,7 @@ func (s *PersistentWorkload) Stop(ctx context.Context) error {
 		statefulSetCopy.Annotations["k8-highlander.io/controlled-shutdown"] = "true"
 		_, err = s.client.AppsV1().StatefulSets(s.config.Namespace).Update(ctx, statefulSetCopy, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Warningf("Failed to mark StatefulSet %s for controlled shutdown: %v", s.config.Name, err)
+			klog.Warningf("Failed to mark StatefulSet %s for controlled shutdown: %v", s, err)
 		}
 	}
 
@@ -207,7 +221,7 @@ func (s *PersistentWorkload) Stop(ctx context.Context) error {
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to stop persistent workload %s: %v", s.config.Name, err)
+		klog.Errorf("Failed to stop persistent workload %s: %v", s, err)
 		return fmt.Errorf("failed to scale persistent set to 0: %w", err)
 	}
 
@@ -218,7 +232,7 @@ func (s *PersistentWorkload) Stop(ctx context.Context) error {
 		})
 
 		if err != nil {
-			klog.Warningf("Error listing pods for persistent set %s: %v [elapsed: %s]", s.config.Name, err, time.Since(startTime))
+			klog.Warningf("Error listing pods for persistent set %s: %v [elapsed: %s]", s, err, time.Since(startTime))
 			return false, nil
 		}
 
@@ -253,9 +267,14 @@ func (s *PersistentWorkload) Stop(ctx context.Context) error {
 		klog.Warningf("Timed out waiting for persistent set pods to be deleted: %v [elapsed: %s]", waitErr, time.Since(startTime))
 	}
 
-	klog.Infof("Successfully stopped persistent workload %s in namespace %s [elapsed: %s]", s.config.Name, s.config.Namespace, time.Since(startTime))
+	klog.Infof("Successfully stopped persistent workload %s in namespace %s [elapsed: %s]", s, s.config.Namespace, time.Since(startTime))
 
 	return nil
+}
+
+// GetConfig returns a workload info
+func (p *PersistentWorkload) GetConfig() common.BaseWorkloadConfig {
+	return p.config.BaseWorkloadConfig
 }
 
 func (s *PersistentWorkload) SetMonitoring(metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) {

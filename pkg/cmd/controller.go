@@ -50,17 +50,14 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/leader"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"github.com/bhatti/k8-highlander/pkg/server"
 	"github.com/bhatti/k8-highlander/pkg/storage"
 	"github.com/bhatti/k8-highlander/pkg/workloads"
-	"github.com/bhatti/k8-highlander/pkg/workloads/cronjob"
-	"github.com/bhatti/k8-highlander/pkg/workloads/persistent"
-	"github.com/bhatti/k8-highlander/pkg/workloads/process"
-	"github.com/bhatti/k8-highlander/pkg/workloads/service"
-	"k8s.io/client-go/kubernetes"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
@@ -87,6 +84,18 @@ func runController() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Create apiextensions clientset for CRD management
+	apiextensionsClient, err := apiextensionsclientset.NewForConfig(cluster.SelectedKubeconfig)
+	if err != nil {
+		return fmt.Errorf("failed to create apiextensions client: %w", err)
+	}
+
+	// Create and initialize CRD registry
+	crdRegistry := common.NewCRDRegistry(apiextensionsClient)
+	if err := crdRegistry.RegisterCRDs(ctx); err != nil {
+		klog.Warningf("Failed to register CRDs: %v. Continuing anyway as they may already exist.", err)
+	}
+
 	// Initialize monitoring
 	metrics := monitoring.NewControllerMetrics(nil) // Use default registry
 	monitoringServer := monitoring.NewMonitoringServer(
@@ -99,7 +108,7 @@ func runController() error {
 	}
 
 	// Initialize workload manager
-	workloadManager, err := initializeWorkloadManagers(ctx, cluster.GetClient(), &appConfig, metrics, monitoringServer)
+	workloadManager, err := workloads.InitializeWorkloadManagers(ctx, cluster.GetClient(), &appConfig, metrics, monitoringServer)
 	if err != nil {
 		return err
 	}
@@ -128,6 +137,7 @@ func runController() error {
 		monitoringServer,
 		workloadManager,
 		appConfig.Tenant,
+		appConfig.RemainFollower,
 	)
 
 	// Handle graceful shutdown
@@ -145,80 +155,6 @@ func runController() error {
 	<-ctx.Done()
 	klog.Info("Main context canceled, exiting")
 	return nil
-}
-
-// initializeWorkloadManagers creates and configures all workload managers for
-// different types of workloads (processes, cron jobs, services, persistent sets).
-// It registers each manager with the main workload manager.
-//
-// Parameters:
-//   - ctx: Context for cancellation
-//   - k8sClient: Kubernetes client interface
-//   - cfg: Application configuration with workload definitions
-//   - metrics: Metrics collector for the controller
-//   - monitoringServer: Monitoring server for status reporting
-//
-// Returns:
-//   - workloads.Manager: Configured workload manager with all workload types registered
-//   - error: Error if any workload manager fails to initialize
-func initializeWorkloadManagers(_ context.Context, _ kubernetes.Interface, cfg *common.AppConfig,
-	metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) (workloads.Manager, error) {
-	// Create workload manager
-	manager := workloads.NewManager(metrics, monitoringServer)
-
-	// Add Process manager with processes from config
-	processManager := process.NewProcessManager(cfg.Namespace, "", metrics, monitoringServer)
-	for _, processConfig := range cfg.Workloads.Processes {
-		if err := processManager.AddProcess(processConfig); err != nil {
-			klog.Errorf("Failed to add process %s: %v", processConfig.Name, err)
-		} else {
-			klog.Infof("Added process %s", processConfig.Name)
-		}
-	}
-	if err := manager.AddWorkload(processManager); err != nil {
-		return nil, err
-	}
-
-	// Add CronJob manager with cron jobs from config
-	cronJobManager := cronjob.NewCronJobManager(cfg.Namespace, "", metrics, monitoringServer)
-	for _, cronJobConfig := range cfg.Workloads.CronJobs {
-		if err := cronJobManager.AddCronJob(cronJobConfig); err != nil {
-			klog.Errorf("Failed to add cron job %s: %v", cronJobConfig.Name, err)
-		} else {
-			klog.Infof("Added cron job %s", cronJobConfig.Name)
-		}
-	}
-	if err := manager.AddWorkload(cronJobManager); err != nil {
-		return nil, err
-	}
-
-	// Add Deployment manager with deployments from config
-	deploymentManager := service.NewDeploymentManager(cfg.Namespace, "", metrics, monitoringServer)
-	for _, deploymentConfig := range cfg.Workloads.Services {
-		if err := deploymentManager.AddDeployment(deploymentConfig); err != nil {
-			klog.Errorf("Failed to add deployment %s: %v", deploymentConfig.Name, err)
-		} else {
-			klog.Infof("Added deployment %s", deploymentConfig.Name)
-		}
-	}
-	if err := manager.AddWorkload(deploymentManager); err != nil {
-		return nil, err
-	}
-
-	// Add StatefulSet manager with stateful sets from config
-	statefulSetManager := persistent.NewPersistentManager(cfg.Namespace, "", metrics, monitoringServer)
-	for _, statefulSetConfig := range cfg.Workloads.PersistentSets {
-		if err := statefulSetManager.AddStatefulSet(statefulSetConfig); err != nil {
-			klog.Errorf("Failed to add persistent set %s: %v", statefulSetConfig.Name, err)
-		} else {
-			klog.Infof("Added persistent set %s", statefulSetConfig.Name)
-		}
-	}
-	if err := manager.AddWorkload(statefulSetManager); err != nil {
-		return nil, err
-	}
-
-	return manager, nil
 }
 
 // setupSignalHandler configures signal handling for graceful shutdown of all components.

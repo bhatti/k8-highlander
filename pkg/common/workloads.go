@@ -47,19 +47,21 @@ import (
 	"k8s.io/klog/v2"
 	"strings"
 	"time"
-
-	"k8s.io/client-go/kubernetes"
 )
 
 // WorkloadType represents the type of workload
 type WorkloadType string
 
 const (
-	WorkloadTypeProcess    WorkloadType = "process"    // Generic process
-	WorkloadTypeService    WorkloadType = "service"    // Kubernetes service deployment
-	WorkloadTypeCronJob    WorkloadType = "cronjob"    // Kubernetes cron job
-	WorkloadTypePersistent WorkloadType = "persistent" // Kubernetes stateful set
-	WorkloadTypeCustom     WorkloadType = "custom"     // Custom workload
+	WorkloadTypeProcess           WorkloadType = "process"           // Generic process
+	WorkloadTypeService           WorkloadType = "service"           // Kubernetes service deployment
+	WorkloadTypeCronJob           WorkloadType = "cronjob"           // Kubernetes cron job
+	WorkloadTypePersistent        WorkloadType = "persistent"        // Kubernetes stateful set
+	WorkloadTypeProcessManager    WorkloadType = "processManager"    // Generic process manager
+	WorkloadTypeServiceManager    WorkloadType = "serviceManager"    // Kubernetes service deployment manager
+	WorkloadTypeCronJobManager    WorkloadType = "cronjobManager"    // Kubernetes cron job manager
+	WorkloadTypePersistentManager WorkloadType = "persistentManager" // Kubernetes stateful set manager
+	WorkloadTypeCustom            WorkloadType = "custom"            // Custom workload
 )
 
 // WorkloadStatus represents the current status of a workload
@@ -85,7 +87,7 @@ func (ws *WorkloadStatus) ActiveHealthyFloat() float64 {
 // that enables the unified handling of different workload types.
 type Workload interface {
 	// Start starts the workload
-	Start(ctx context.Context, client kubernetes.Interface) error
+	Start(ctx context.Context) error
 
 	// Stop stops the workload
 	Stop(ctx context.Context) error
@@ -98,6 +100,9 @@ type Workload interface {
 
 	// GetType returns the type of the workload
 	GetType() WorkloadType
+
+	// GetConfig returns a workload info
+	GetConfig() BaseWorkloadConfig
 }
 
 // BaseWorkloadConfig Common base configuration for all workload types
@@ -117,13 +122,12 @@ type BaseWorkloadConfig struct {
 	RestartPolicy string            `json:"restartPolicy,omitempty" yaml:"restartPolicy,omitempty"`
 	NodeSelector  map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 	//Tolerations   []Toleration      `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
-	Ports                  []PortConfig      `json:"ports,omitempty" yaml:"ports,omitempty"`
-	Sidecars               []ContainerConfig `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
-	Replicas               int32             `json:"replicas"`
-	TerminationGracePeriod time.Duration     `json:"terminationGracePeriod,omitempty" yaml:"terminationGracePeriod,omitempty"`
-
-	// New fields for CRD references
-	WorkloadCRDRef *WorkloadCRDReference `json:"workloadCRDRef,omitempty" yaml:"workloadCRDRef,omitempty"`
+	Ports                  []PortConfig          `json:"ports,omitempty" yaml:"ports,omitempty"`
+	Sidecars               []ContainerConfig     `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
+	Replicas               int32                 `json:"replicas"`
+	TerminationGracePeriod time.Duration         `json:"terminationGracePeriod,omitempty" yaml:"terminationGracePeriod,omitempty"`
+	WorkloadCRDRef         *WorkloadCRDReference `json:"workloadCRDRef,omitempty" yaml:"workloadCRDRef,omitempty"`
+	ID                     string                `json:"-" yaml:"-"`
 }
 
 // WorkloadCRDReference defines a reference to a Workload CRD
@@ -141,7 +145,7 @@ func ContainersSummary(containers []corev1.Container) string {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		buf.WriteString(fmt.Sprintf("{name: %s, resources: {requests: %v, limits: %v}}",
+		buf.WriteString(fmt.Sprintf("{name: %s, requests: %v, limits: %v}",
 			c.Name, c.Resources.Requests, c.Resources.Limits))
 	}
 	buf.WriteString("]}")
@@ -150,8 +154,8 @@ func ContainersSummary(containers []corev1.Container) string {
 
 func (c *BaseWorkloadConfig) BuildContainers(leaderInfo LocalLeaderInfo) (labels map[string]string, containers []corev1.Container, err error) {
 	if !leaderInfo.IsLeader {
-		klog.Errorf("should not be able to build containers if not leader %v", leaderInfo)
-		return labels, containers, fmt.Errorf("should not be able to build containers if not leader %v", leaderInfo)
+		klog.V(4).Infof("should not be able to build containers if not leader %v", leaderInfo)
+		return labels, containers, fmt.Errorf("cannot build containers if not leader %v", leaderInfo)
 	}
 
 	// Set up environment variables

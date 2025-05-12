@@ -1,82 +1,155 @@
-id: ""  # Will use hostname if empty
-tenant: "default"
-port: 8080
+id: "follower"
+tenant: "test-tenant"
+port: 8081
 namespace: "default"
 
 # Storage configuration
-storageType: "redis"  # "redis" or "db"
+storageType: "redis"
 redis:
   addr: "localhost:6379"
   password: ""
   db: 0
-databaseURL: ""  # Used if storageType is "db"
 
 # Cluster configuration
 cluster:
-  name: "default"
-  kubeconfig: ""  # Will use in-cluster config if empty
+  name: "docker-desktop"
+  kubeconfig: "/Users/shahzadbhatti/.kube/config"
 
 # Workloads configuration
 workloads:
   processes:
-    - name: "example-process"
+    # Regular process configuration
+    - name: "singleton-echo"
       image: "busybox:latest"
       script:
         commands:
-          - "echo 'Starting example process'"
-          - "sleep 3600"
+          - "echo 'Starting singleton process'"
+          - "echo 'Process ID: $$'"
+          - "while true; do echo \"Regular process heartbeat at $(date)\"; sleep 10; done"
         shell: "/bin/sh"
       env:
-        EXAMPLE_VAR: "example-value"
+        TEST_ENV: "regular-value"
       resources:
         cpuRequest: "100m"
         memoryRequest: "64Mi"
         cpuLimit: "200m"
         memoryLimit: "128Mi"
-      restartPolicy: "OnFailure"
+      restartPolicy: "Never"
+
+    # CRD-based process configuration
+    - name: "crd-echo"
+      # Minimal config since we'll get most from CRD
+      image: "busybox:latest"  # Fallback image
+      script:
+        commands:
+          - "echo 'Fallback script'"
+        shell: "/bin/sh"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadProcess"
+        name: "crd-process"
+        namespace: "default"
 
   cronJobs:
-    - name: "example-cronjob"
-      schedule: "*/15 * * * *"
+    # Regular cronjob configuration
+    - name: "singleton-cron"
+      schedule: "*/1 * * * *"
       image: "busybox:latest"
       script:
         commands:
-          - "echo 'Running example cron job at $(date)'"
+          - "echo 'Running regular cron job at $(date)'"
+          - "echo 'Hostname: $(hostname)'"
+          - "sleep 15"
         shell: "/bin/sh"
+      env:
+        TEST_ENV: "regular-value"
+      resources:
+        cpuRequest: "50m"
+        memoryRequest: "32Mi"
+        cpuLimit: "100m"
+        memoryLimit: "64Mi"
       restartPolicy: "OnFailure"
 
+    # CRD-based cronjob configuration
+    - name: "crd-cron"
+      schedule: "*/5 * * * *"  # Fallback schedule
+      image: "busybox:latest"  # Fallback image
+      script:
+        commands:
+          - "echo 'Fallback script'"
+        shell: "/bin/sh"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadCronJob"
+        name: "crd-cronjob"
+        namespace: "default"
+
   services:
-    - name: "example-service"
-      image: "nginx:alpine"
+    # Regular service configuration
+    - name: "singleton-service"
       replicas: 1
+      image: "nginx:alpine"
+      script:
+        commands:
+          - "nginx -g 'daemon off;'"
+        shell: "/bin/sh"
       ports:
         - name: "http"
           containerPort: 80
-          servicePort: 8080
+          servicePort: 8181
       resources:
         cpuRequest: "100m"
         memoryRequest: "64Mi"
         cpuLimit: "200m"
         memoryLimit: "128Mi"
 
+    # CRD-based service configuration
+    - name: "crd-service-frontend"
+      replicas: 1  # Fallback replicas
+      image: "nginx:alpine"  # Fallback image
+      script:
+        commands:
+          - "nginx -g 'daemon off;'"
+        shell: "/bin/sh"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadService"
+        name: "crd-service"
+        namespace: "default"
+
   persistentSets:
-    - name: "example-persistent"
-      image: "postgres:14-alpine"
+    # Regular persistent configuration
+    - name: "singleton-persistent"
       replicas: 1
-      env:
-        POSTGRES_PASSWORD: "example"
-        POSTGRES_USER: "example"
-        POSTGRES_DB: "example"
+      image: "redis:alpine"
+      script:
+        commands:
+          - "redis-server"
+        shell: "/bin/sh"
       ports:
-        - name: "postgres"
-          containerPort: 5432
-          servicePort: 5432
+        - name: "redis"
+          containerPort: 6379
+          servicePort: 6379
       persistentVolumes:
         - name: "data"
-          mountPath: "/var/lib/postgresql/data"
+          mountPath: "/data"
           size: "1Gi"
       resources:
-        cpuRequest: "200m"
-        memoryRequest: "256Mi"
-        cpuLimit: "500m"
-        memoryLimit: "512Mi"
+        cpuRequest: "100m"
+        memoryRequest: "128Mi"
+        cpuLimit: "200m"
+        memoryLimit: "256Mi"
+
+    # CRD-based persistent configuration
+    - name: "crd-persistent-db"
+      replicas: 1  # Fallback replicas
+      image: "redis:alpine"  # Fallback image
+      script:
+        commands:
+          - "redis-server"
+        shell: "/bin/sh"
+      workloadCRDRef:
+        apiVersion: "highlander.plexobject.io/v1"
+        kind: "WorkloadPersistent"
+        name: "crd-persistent"
+        namespace: "default"

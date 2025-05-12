@@ -54,6 +54,7 @@ import (
 	"fmt"
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
+	"github.com/oklog/ulid/v2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -75,6 +76,7 @@ type ServiceWorkload struct {
 	status           common.WorkloadStatus
 	statusMutex      sync.RWMutex
 	stopCh           chan struct{}
+	stopped          bool
 	client           kubernetes.Interface
 	metrics          *monitoring.ControllerMetrics
 	monitoringServer *monitoring.MonitoringServer
@@ -82,9 +84,12 @@ type ServiceWorkload struct {
 
 // NewServiceWorkload creates a new deployment workload
 func NewServiceWorkload(config common.ServiceConfig, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) (*ServiceWorkload, error) {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) (*ServiceWorkload, error) {
 	if err := common.ValidationErrors(config.Validate("")); err != nil {
 		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("kubernetes client not specified")
 	}
 	// Set defaults
 	if config.ReadinessTimeout == 0 {
@@ -93,12 +98,14 @@ func NewServiceWorkload(config common.ServiceConfig, metrics *monitoring.Control
 	if config.TerminationGracePeriod == 0 {
 		config.TerminationGracePeriod = 28
 	}
+	config.ID = ulid.Make().String()
 
 	return &ServiceWorkload{
 		config:           config,
 		stopCh:           make(chan struct{}),
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    config.Name,
 			Type:    common.WorkloadTypeService,
@@ -109,13 +116,19 @@ func NewServiceWorkload(config common.ServiceConfig, metrics *monitoring.Control
 	}, nil
 }
 
+func (d *ServiceWorkload) String() string {
+	d.statusMutex.RLock()
+	defer d.statusMutex.RUnlock()
+	return fmt.Sprintf("ServiceWorkload(id=%s, name=%s, active=%v, healthy=%v, image=%s)",
+		d.config.ID, d.config.Name, d.status.Active, d.status.Healthy, d.config.Image)
+}
+
 // Start creates or updates the Deployment in Kubernetes and begins health monitoring.
 // It ensures the Deployment is properly configured with the right number of replicas.
-func (d *ServiceWorkload) Start(ctx context.Context, client kubernetes.Interface) error {
-	klog.V(2).Infof("Starting deployment workload %s in namespace %s", d.config.Name, d.config.Namespace)
+func (d *ServiceWorkload) Start(ctx context.Context) error {
+	klog.V(2).Infof("Starting deployment workload %s in namespace %s", d, d.config.Namespace)
 
 	startTime := time.Now()
-	d.client = client
 
 	// Create or update the deployment
 	err := d.createOrUpdateDeployment(ctx)
@@ -132,7 +145,7 @@ func (d *ServiceWorkload) Start(ctx context.Context, client kubernetes.Interface
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to start deployment workload %s: %v", d.config.Name, err)
+		klog.Errorf("Failed to start deployment workload %s: %v", d, err)
 
 		return fmt.Errorf("failed to create or update deployment: %w", err)
 	}
@@ -140,7 +153,7 @@ func (d *ServiceWorkload) Start(ctx context.Context, client kubernetes.Interface
 	// Start monitoring the deployment health
 	go d.monitorHealth(ctx)
 	klog.Infof("Successfully started deployment workload %s in namespace %s [elapsed: %s %v]",
-		d.config.Name, d.config.Namespace, time.Since(startTime), d.monitoringServer.GetLeaderInfo())
+		d, d.config.Namespace, time.Since(startTime), d.monitoringServer.GetLeaderInfo())
 
 	return nil
 }
@@ -148,23 +161,23 @@ func (d *ServiceWorkload) Start(ctx context.Context, client kubernetes.Interface
 // Stop gracefully scales down the Deployment and waits for termination of pods.
 // It adds controlled shutdown annotations and forces deletion of stuck pods if necessary.
 func (d *ServiceWorkload) Stop(ctx context.Context) error {
-	klog.V(2).Infof("Stopping deployment workload %s in namespace %s", d.config.Name, d.config.Namespace)
+	klog.V(2).Infof("Stopping deployment workload %s in namespace %s", d, d.config.Namespace)
 
 	startTime := time.Now()
 
 	// Use a mutex to safely close the channel only once
 	d.statusMutex.Lock()
-	if d.stopCh != nil {
+	if d.stopCh != nil && !d.stopped {
 		// Check if channel is already closed by trying to read from it
 		select {
 		case <-d.stopCh:
 			// Channel is already closed, create a new one for future use
-			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", d.config.Name)
+			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", d)
 			d.stopCh = make(chan struct{})
 		default:
 			// Channel is still open, close it
 			close(d.stopCh)
-			d.stopCh = nil
+			d.stopped = true
 		}
 	}
 	d.statusMutex.Unlock()
@@ -173,7 +186,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 	deployment, err := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
 	if err == nil {
 		// Deployment exists, add shutdown annotation
-		klog.Infof("Marking Deployment %s for controlled shutdown", d.config.Name)
+		klog.Infof("Marking Deployment %s for controlled shutdown", d)
 		deploymentCopy := deployment.DeepCopy()
 		if deploymentCopy.Annotations == nil {
 			deploymentCopy.Annotations = make(map[string]string)
@@ -181,7 +194,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 		deploymentCopy.Annotations["k8-highlander.io/controlled-shutdown"] = "true"
 		_, err = d.client.AppsV1().Deployments(d.config.Namespace).Update(ctx, deploymentCopy, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Warningf("Failed to mark Deployment %s for controlled shutdown: %v", d.config.Name, err)
+			klog.Warningf("Failed to mark Deployment %s for controlled shutdown: %v", d, err)
 		}
 	}
 
@@ -200,7 +213,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to stop deployment workload %s: %v [elapsed: %s]", d.config.Name, err, time.Since(startTime))
+		klog.Errorf("Failed to stop deployment workload %s: %v [elapsed: %s]", d, err, time.Since(startTime))
 		return fmt.Errorf("failed to scale deployment to 0: %w", err)
 	}
 
@@ -211,7 +224,7 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 		})
 
 		if err != nil {
-			klog.Warningf("Error listing pods for deployment %s: %v [elapsed: %s]", d.config.Name, err, time.Since(startTime))
+			klog.Warningf("Error listing pods for deployment %s: %v [elapsed: %s]", d, err, time.Since(startTime))
 			return false, nil
 		}
 
@@ -248,9 +261,14 @@ func (d *ServiceWorkload) Stop(ctx context.Context) error {
 	}
 
 	klog.Infof("Successfully stopped deployment workload %s in namespace %s [elapsed: %s %v]",
-		d.config.Name, d.config.Namespace, time.Since(startTime), d.monitoringServer.GetLeaderInfo())
+		d, d.config.Namespace, time.Since(startTime), d.monitoringServer.GetLeaderInfo())
 
 	return nil
+}
+
+// GetConfig returns a workload info
+func (d *ServiceWorkload) GetConfig() common.BaseWorkloadConfig {
+	return d.config.BaseWorkloadConfig
 }
 
 func (d *ServiceWorkload) SetMonitoring(metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) {
@@ -298,7 +316,7 @@ func (d *ServiceWorkload) createOrUpdateDeployment(ctx context.Context) error {
 		}
 
 		klog.Infof("Created deployment %s in namespace %s, %s",
-			d.config.Name, d.config.Namespace, common.ContainersSummary(deployment.Spec.Template.Spec.Containers))
+			d, d.config.Namespace, common.ContainersSummary(deployment.Spec.Template.Spec.Containers))
 	} else {
 		// Update existing deployment
 		// Preserve some fields from the existing deployment
@@ -311,7 +329,7 @@ func (d *ServiceWorkload) createOrUpdateDeployment(ctx context.Context) error {
 		}
 
 		klog.V(4).Infof("Updated deployment %s in namespace %s, %s [%v]",
-			d.config.Name, d.config.Namespace,
+			d, d.config.Namespace,
 			common.ContainersSummary(deployment.Spec.Template.Spec.Containers), d.monitoringServer.GetLeaderInfo())
 	}
 
@@ -332,7 +350,7 @@ func (d *ServiceWorkload) scaleDeployment(ctx context.Context, replicas int32) e
 		deployment, err := d.client.AppsV1().Deployments(d.config.Namespace).Get(ctx, d.config.Name, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
-				klog.Warningf("Deployment %s not found", d.config.Name)
+				klog.Warningf("Deployment %s not found", d)
 				return nil
 			}
 			return fmt.Errorf("failed to get deployment: %w", err)
@@ -356,7 +374,7 @@ func (d *ServiceWorkload) scaleDeployment(ctx context.Context, replicas int32) e
 			}
 		})
 
-		klog.Infof("Scaled deployment %s to %d replicas", d.config.Name, replicas)
+		klog.Infof("Scaled deployment %s to %d replicas", d, replicas)
 		return nil
 	})
 }
@@ -374,7 +392,7 @@ func (d *ServiceWorkload) monitorHealth(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := d.checkHealth(ctx); err != nil {
-				klog.Errorf("Deployment health check failed %s: %v", d.config.Name, err)
+				klog.Errorf("Deployment health check failed %s: %v", d, err)
 
 				d.updateStatus(func(s *common.WorkloadStatus) {
 					s.Healthy = false
@@ -429,7 +447,7 @@ func (d *ServiceWorkload) checkHealth(ctx context.Context) error {
 		}
 
 		if deploymentMessage != "" {
-			return false, deploymentMessage, fmt.Errorf(deploymentMessage)
+			return false, deploymentMessage, fmt.Errorf("deployment failure: %s", deploymentMessage)
 		}
 
 		// If desired replicas is 0, then the deployment is considered inactive but healthy

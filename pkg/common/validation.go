@@ -43,6 +43,7 @@ package common
 
 import (
 	"fmt"
+	"k8s.io/klog/v2"
 	"os"
 	"strings"
 	"time"
@@ -332,7 +333,7 @@ func (cfg *AppConfig) Validate() error {
 
 	if len(cfg.Workloads.Processes) == 0 && len(cfg.Workloads.CronJobs) == 0 &&
 		len(cfg.Workloads.Services) == 0 && len(cfg.Workloads.PersistentSets) == 0 {
-		return fmt.Errorf("workload is not specified")
+		klog.Warningf("workload is not specified")
 	}
 	var allErrors []ValidationError
 	for _, work := range cfg.Workloads.Processes {

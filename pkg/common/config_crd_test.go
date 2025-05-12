@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,7 +86,7 @@ func TestCheckForCRDReferences(t *testing.T) {
 								Name:  "test-process",
 								Image: "test-image",
 								WorkloadCRDRef: &WorkloadCRDReference{
-									APIVersion: "highlander.plexobject.io/v1",
+									APIVersion: GROUP + "/" + MajorVersion,
 									Kind:       "WorkloadProcess",
 									Name:       "test-process",
 									Namespace:  "default",
@@ -116,7 +117,7 @@ func TestLoadWorkloadFromCRD(t *testing.T) {
 	// Create test objects
 	processObj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "highlander.plexobject.io/v1",
+			"apiVersion": GROUP + "/" + MajorVersion,
 			"kind":       "WorkloadProcess",
 			"metadata": map[string]interface{}{
 				"name":      "test-process",
@@ -147,16 +148,16 @@ func TestLoadWorkloadFromCRD(t *testing.T) {
 
 	// Add the object to the fake client
 	_, err := client.Resource(schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadprocesses",
+		Group:    GROUP,
+		Version:  MajorVersion,
+		Resource: ProcessesResource,
 	}).Namespace("default").Create(context.Background(), processObj, metav1.CreateOptions{})
 	require.NoError(t, err)
 
 	// Test loading the workload
 	t.Run("LoadWorkloadProcess", func(t *testing.T) {
 		ref := &WorkloadCRDReference{
-			APIVersion: "highlander.plexobject.io/v1",
+			APIVersion: GROUP + "/" + MajorVersion,
 			Kind:       "WorkloadProcess",
 			Name:       "test-process",
 			Namespace:  "default",
@@ -196,7 +197,7 @@ func TestLoadWorkloadFromCRD(t *testing.T) {
 // TestClusterConfigWithSelectedKubeconfig tests the ClusterConfig with SelectedKubeconfig field
 func TestClusterConfigWithSelectedKubeconfig(t *testing.T) {
 	// Create a fake client
-	fakeClient := fakeKube.NewSimpleClientset()
+	fakeClient := fakeKube.NewClientset()
 
 	// Create a cluster config
 	cluster := &ClusterConfig{
@@ -206,9 +207,10 @@ func TestClusterConfigWithSelectedKubeconfig(t *testing.T) {
 			Host: "https://example.com",
 		},
 	}
+	mockDynamicClient := dynamicfake.NewSimpleDynamicClient(CreateTestScheme())
 
 	// Set the client
-	cluster.SetClient(fakeClient)
+	cluster.SetClient(fakeClient, mockDynamicClient)
 
 	// Check that we can get the client
 	client := cluster.GetClient()
@@ -224,7 +226,7 @@ func TestLoadCRDConfigurations(t *testing.T) {
 	// Create test objects
 	processObj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"apiVersion": "highlander.plexobject.io/v1",
+			"apiVersion": GROUP + "/" + MajorVersion,
 			"kind":       "WorkloadProcess",
 			"metadata": map[string]interface{}{
 				"name":      "test-process",
@@ -249,9 +251,9 @@ func TestLoadCRDConfigurations(t *testing.T) {
 
 	// Add the object to the fake client
 	_, err := client.Resource(schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
-		Resource: "workloadprocesses",
+		Group:    GROUP,
+		Version:  MajorVersion,
+		Resource: ProcessesResource,
 	}).Namespace("default").Create(context.Background(), processObj, metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -268,7 +270,7 @@ func TestLoadCRDConfigurations(t *testing.T) {
 					BaseWorkloadConfig: BaseWorkloadConfig{
 						Name: "reference-process",
 						WorkloadCRDRef: &WorkloadCRDReference{
-							APIVersion: "highlander.plexobject.io/v1",
+							APIVersion: GROUP + "/" + MajorVersion,
 							Kind:       "WorkloadProcess",
 							Name:       "test-process",
 							Namespace:  "default",
@@ -346,7 +348,7 @@ func TestConfigWithCRDValidation(t *testing.T) {
 						Name: "test-process",
 						// Missing image and script
 						WorkloadCRDRef: &WorkloadCRDReference{
-							APIVersion: "highlander.plexobject.io/v1",
+							APIVersion: GROUP + "/" + MajorVersion,
 							Kind:       "WorkloadProcess",
 							Name:       "test-process",
 							Namespace:  "default",

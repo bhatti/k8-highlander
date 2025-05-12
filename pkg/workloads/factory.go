@@ -51,6 +51,7 @@ import (
 	"github.com/bhatti/k8-highlander/pkg/common"
 	"github.com/bhatti/k8-highlander/pkg/monitoring"
 	"gopkg.in/yaml.v3"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
@@ -92,7 +93,7 @@ type WorkloadConfig struct {
 // LoadWorkloadsFromConfig scans the configuration directory for workload definition
 // files and loads them into the provided workload manager. It supports YAML, YML,
 // and JSON file formats.
-func (f *WorkloadFactory) LoadWorkloadsFromConfig(manager Manager) error {
+func (f *WorkloadFactory) LoadWorkloadsFromConfig(manager Manager, client kubernetes.Interface) error {
 	// Find all config files in the config directory
 	yamlFiles, err := filepath.Glob(filepath.Join(f.configDir, "*.yaml"))
 	if err != nil {
@@ -116,7 +117,7 @@ func (f *WorkloadFactory) LoadWorkloadsFromConfig(manager Manager) error {
 
 	// Load each config file
 	for _, configFile := range configFiles {
-		if err := f.loadWorkloadFile(configFile, manager); err != nil {
+		if err := f.loadWorkloadFile(configFile, manager, client); err != nil {
 			klog.Errorf("Failed to load workload from %s: %v", configFile, err)
 			continue
 		}
@@ -126,7 +127,7 @@ func (f *WorkloadFactory) LoadWorkloadsFromConfig(manager Manager) error {
 }
 
 // loadWorkloadFile loads workloads from a single configuration file
-func (f *WorkloadFactory) loadWorkloadFile(configFile string, manager Manager) error {
+func (f *WorkloadFactory) loadWorkloadFile(configFile string, manager Manager, client kubernetes.Interface) error {
 	// Read the file
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -164,7 +165,7 @@ func (f *WorkloadFactory) loadWorkloadFile(configFile string, manager Manager) e
 
 	// Create workloads
 	for _, config := range workloadConfigs {
-		workload, err := f.CreateWorkload(config)
+		workload, err := f.CreateWorkload(config, client)
 		if err != nil {
 			klog.Errorf("Failed to create workload %s: %v", config.Name, err)
 			continue
@@ -184,7 +185,7 @@ func (f *WorkloadFactory) loadWorkloadFile(configFile string, manager Manager) e
 // CreateWorkload instantiates a specific workload based on its type and configuration.
 // It handles the conversion of generic configuration to type-specific structures
 // and delegates to the appropriate workload constructors.
-func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig) (common.Workload, error) {
+func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig, client kubernetes.Interface) (common.Workload, error) {
 	// Convert config to appropriate type
 	configBytes, err := json.Marshal(config.Config)
 	if err != nil {
@@ -203,7 +204,7 @@ func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig) (common.Workload
 			processConfig.Name = config.Name
 		}
 
-		return process.NewProcessWorkload(processConfig, f.metrics, f.monitoringServer)
+		return process.NewProcessWorkload(processConfig, f.metrics, f.monitoringServer, client)
 
 	case common.WorkloadTypeService:
 		var deploymentConfig common.ServiceConfig
@@ -216,7 +217,7 @@ func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig) (common.Workload
 			deploymentConfig.Name = config.Name
 		}
 
-		return service.NewServiceWorkload(deploymentConfig, f.metrics, f.monitoringServer)
+		return service.NewServiceWorkload(deploymentConfig, f.metrics, f.monitoringServer, client)
 
 	case common.WorkloadTypeCronJob:
 		var cronJobConfig common.CronJobConfig
@@ -229,7 +230,7 @@ func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig) (common.Workload
 			cronJobConfig.Name = config.Name
 		}
 
-		return cronjob.NewCronJobWorkload(cronJobConfig, f.metrics, f.monitoringServer)
+		return cronjob.NewCronJobWorkload(cronJobConfig, f.metrics, f.monitoringServer, client)
 
 	case common.WorkloadTypePersistent:
 		var statefulSetConfig common.PersistentConfig
@@ -242,7 +243,7 @@ func (f *WorkloadFactory) CreateWorkload(config WorkloadConfig) (common.Workload
 			statefulSetConfig.Name = config.Name
 		}
 
-		return persistent.NewPersistentWorkload(statefulSetConfig, f.metrics, f.monitoringServer)
+		return persistent.NewPersistentWorkload(statefulSetConfig, f.metrics, f.monitoringServer, client)
 
 	default:
 		return nil, common.NewSevereErrorMessage("WorkloadFactory", fmt.Sprintf("unsupported workload type: %s", config.Type))

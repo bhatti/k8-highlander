@@ -390,10 +390,10 @@ func (m *MonitoringServer) UpdateControllerState(state common.ControllerState) {
 	m.healthStatus.ControllerState = state
 
 	// Update metrics
-	if state == "Normal" {
+	if state == common.StateNormal {
 		m.metrics.ControllerStatus.WithLabelValues("normal").Set(1)
 		m.metrics.ControllerStatus.WithLabelValues("degraded").Set(0)
-	} else if state == "Degraded" {
+	} else if state == common.StateDegraded {
 		m.metrics.ControllerStatus.WithLabelValues("normal").Set(0)
 		m.metrics.ControllerStatus.WithLabelValues("degraded").Set(1)
 	}

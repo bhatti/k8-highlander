@@ -54,6 +54,7 @@ import (
 	"sync"
 	"time"
 
+	ulid "github.com/oklog/ulid/v2"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -68,6 +69,7 @@ type CronJobWorkload struct {
 	status           common.WorkloadStatus
 	statusMutex      sync.RWMutex
 	stopCh           chan struct{}
+	stopped          bool
 	client           kubernetes.Interface
 	metrics          *monitoring.ControllerMetrics
 	monitoringServer *monitoring.MonitoringServer
@@ -75,20 +77,25 @@ type CronJobWorkload struct {
 
 // NewCronJobWorkload creates a new cron job workload
 func NewCronJobWorkload(config common.CronJobConfig, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) (*CronJobWorkload, error) {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) (*CronJobWorkload, error) {
 	if err := common.ValidationErrors(config.Validate("")); err != nil {
 		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("kubernetes client not specified")
 	}
 	// Set defaults
 	if config.RestartPolicy == "" {
 		config.RestartPolicy = "OnFailure"
 	}
+	config.ID = ulid.Make().String()
 
 	return &CronJobWorkload{
 		config:           config,
 		stopCh:           make(chan struct{}),
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    config.Name,
 			Type:    common.WorkloadTypeCronJob,
@@ -99,13 +106,19 @@ func NewCronJobWorkload(config common.CronJobConfig, metrics *monitoring.Control
 	}, nil
 }
 
+func (c *CronJobWorkload) String() string {
+	c.statusMutex.RLock()
+	defer c.statusMutex.RUnlock()
+	return fmt.Sprintf("CronJobWorkload(id=%s, name=%s, active=%v, healthy=%v, image=%s)",
+		c.config.ID, c.config.Name, c.status.Active, c.status.Healthy, c.config.Image)
+}
+
 // Start creates or updates the CronJob in Kubernetes and begins health monitoring.
 // It ensures the CronJob is active (not suspended) and properly configured.
-func (c *CronJobWorkload) Start(ctx context.Context, client kubernetes.Interface) error {
-	klog.V(2).Infof("Starting cron workload %s in namespace %s", c.config.Name, c.config.Namespace)
+func (c *CronJobWorkload) Start(ctx context.Context) error {
+	klog.V(2).Infof("Starting cron workload %s in namespace %s", c, c.config.Namespace)
 
 	startTime := time.Now()
-	c.client = client
 
 	// Create or update the cron job
 	err := c.createOrUpdateCronJob(ctx, false)
@@ -123,7 +136,7 @@ func (c *CronJobWorkload) Start(ctx context.Context, client kubernetes.Interface
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to start cron workload %s: %v [elapsed: %s]", c.config.Name, err, time.Since(startTime))
+		klog.Errorf("Failed to start cron workload %s: %v [elapsed: %s]", c, err, time.Since(startTime))
 
 		return fmt.Errorf("failed to create or update cron job: %w", err)
 	}
@@ -131,7 +144,7 @@ func (c *CronJobWorkload) Start(ctx context.Context, client kubernetes.Interface
 	// Start monitoring the cron job health
 	go c.monitorHealth(ctx)
 	klog.Infof("Successfully started cron workload %s in namespace %s [elapsed: %s %v]",
-		c.config.Name, c.config.Namespace, time.Since(startTime), c.monitoringServer.GetLeaderInfo())
+		c, c.config.Namespace, time.Since(startTime), c.monitoringServer.GetLeaderInfo())
 
 	return nil
 }
@@ -140,23 +153,23 @@ func (c *CronJobWorkload) Start(ctx context.Context, client kubernetes.Interface
 // any running jobs that were created by this CronJob. It uses a controlled shutdown
 // process with annotations to track workloads during transition.
 func (c *CronJobWorkload) Stop(ctx context.Context) error {
-	klog.V(2).Infof("Stopping cron workload %s in namespace %s", c.config.Name, c.config.Namespace)
+	klog.V(2).Infof("Stopping cron workload %s in namespace %s", c, c.config.Namespace)
 
 	startTime := time.Now()
 
 	// Use a mutex to safely close the channel only once
 	c.statusMutex.Lock()
-	if c.stopCh != nil {
+	if c.stopCh != nil && !c.stopped {
 		// Check if channel is already closed by trying to read from it
 		select {
 		case <-c.stopCh:
 			// Channel is already closed, create a new one for future use
-			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", c.config.Name)
+			klog.V(4).Infof("Stop channel for %s was already closed, creating a new one", c)
 			c.stopCh = make(chan struct{})
 		default:
 			// Channel is still open, close it
 			close(c.stopCh)
-			c.stopCh = nil
+			c.stopped = true
 		}
 	}
 	c.statusMutex.Unlock()
@@ -165,7 +178,7 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 	cronJob, err := c.client.BatchV1().CronJobs(c.config.Namespace).Get(ctx, c.config.Name, metav1.GetOptions{})
 	if err == nil {
 		// CronJob exists, add shutdown annotation
-		klog.Infof("Marking CronJob %s for controlled shutdown", c.config.Name)
+		klog.Infof("Marking CronJob %s for controlled shutdown", c)
 		cronJobCopy := cronJob.DeepCopy()
 		if cronJobCopy.Annotations == nil {
 			cronJobCopy.Annotations = make(map[string]string)
@@ -173,7 +186,7 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 		cronJobCopy.Annotations["k8-highlander.io/controlled-shutdown"] = "true"
 		_, err = c.client.BatchV1().CronJobs(c.config.Namespace).Update(ctx, cronJobCopy, metav1.UpdateOptions{})
 		if err != nil {
-			klog.Warningf("Failed to mark CronJob %s for controlled shutdown: %v", c.config.Name, err)
+			klog.Warningf("Failed to mark CronJob %s for controlled shutdown: %v", c, err)
 		}
 	}
 
@@ -193,7 +206,7 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 	}
 
 	if err != nil {
-		klog.Errorf("Failed to stop cron workload %s: %v [elapsed: %s]", c.config.Name, err, time.Since(startTime))
+		klog.Errorf("Failed to stop cron workload %s: %v [elapsed: %s]", c, err, time.Since(startTime))
 		return fmt.Errorf("failed to suspend cron job: %w", err)
 	}
 
@@ -201,14 +214,14 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 	// The correct selector is "job-name" that starts with the CronJob name
 	jobs, err := c.client.BatchV1().Jobs(c.config.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		klog.Warningf("Error listing jobs for cronjob %s: %v [elapsed: %s]", c.config.Name, err, time.Since(startTime))
+		klog.Warningf("Error listing jobs for cronjob %s: %v [elapsed: %s]", c, err, time.Since(startTime))
 	} else {
 		// Filter jobs that belong to this CronJob
 		for _, job := range jobs.Items {
 			// Check if this job was created by our CronJob
 			// Jobs created by CronJobs have names that start with the CronJob name
 			if strings.HasPrefix(job.Name, c.config.Name+"-") {
-				klog.Infof("Deleting job %s for suspended cronjob %s", job.Name, c.config.Name)
+				klog.Infof("Deleting job %s for suspended cronjob %s", job.Name, c)
 
 				// Add controlled shutdown annotation to the job
 				jobCopy := job.DeepCopy()
@@ -297,6 +310,11 @@ func (c *CronJobWorkload) Stop(ctx context.Context) error {
 	klog.Infof("Successfully stopped cron workload %s in namespace %s [elapsed: %s]", c.config.Name, c.config.Namespace, time.Since(startTime))
 
 	return nil
+}
+
+// GetConfig returns a workload info
+func (c *CronJobWorkload) GetConfig() common.BaseWorkloadConfig {
+	return c.config.BaseWorkloadConfig
 }
 
 func (c *CronJobWorkload) SetMonitoring(metrics *monitoring.ControllerMetrics, monitoringServer *monitoring.MonitoringServer) {

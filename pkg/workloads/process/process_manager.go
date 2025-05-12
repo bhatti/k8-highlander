@@ -51,8 +51,11 @@ import (
 	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 )
+
+// var _ workloads.WorkloadManager = &ProcessManager{}
 
 // ProcessManager manages multiple process workloads as a single logical unit.
 // It provides coordinated lifecycle management and status aggregation for all
@@ -69,8 +72,9 @@ type ProcessManager struct {
 
 // NewProcessManager creates a new process manager
 func NewProcessManager(namespace, configDir string, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) *ProcessManager {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) *ProcessManager {
 	return &ProcessManager{
+		client:           client,
 		namespace:        namespace,
 		processes:        make(map[string]*ProcessWorkload),
 		configDir:        configDir,
@@ -82,9 +86,7 @@ func NewProcessManager(namespace, configDir string, metrics *monitoring.Controll
 // Start initializes the manager and starts all registered Process workloads.
 // It first loads configurations from files if a config directory was provided,
 // then starts each workload with the given Kubernetes client.
-func (m *ProcessManager) Start(ctx context.Context, client kubernetes.Interface) error {
-	m.client = client
-
+func (m *ProcessManager) Start(ctx context.Context) error {
 	// Load process configurations
 	if err := m.loadProcessConfigs(); err != nil {
 		return common.NewSevereError("ProcessManager", "failed to load process configs", err)
@@ -95,7 +97,7 @@ func (m *ProcessManager) Start(ctx context.Context, client kubernetes.Interface)
 	defer m.processMutex.RUnlock()
 
 	for _, process := range m.processes {
-		if err := process.Start(ctx, client); err != nil {
+		if err := process.Start(ctx); err != nil {
 			klog.Errorf("Failed to start process %s: %v", process.GetName(), err)
 		}
 	}
@@ -126,7 +128,7 @@ func (m *ProcessManager) GetStatus() common.WorkloadStatus {
 	// Create a combined status
 	status := common.WorkloadStatus{
 		Name:    "processes",
-		Type:    common.WorkloadTypeCustom,
+		Type:    common.WorkloadTypeProcessManager,
 		Active:  true,
 		Healthy: true,
 		Details: make(map[string]interface{}),
@@ -157,7 +159,7 @@ func (m *ProcessManager) GetName() string {
 
 // GetType returns the type of the workload
 func (m *ProcessManager) GetType() common.WorkloadType {
-	return common.WorkloadTypeCustom
+	return common.WorkloadTypeProcessManager
 }
 
 // loadProcessConfigs loads process configurations from files
@@ -225,7 +227,7 @@ func (m *ProcessManager) loadProcessConfigFile(configFile string) error {
 		}
 
 		// Create the process workload
-		process, err := NewProcessWorkload(config, m.metrics, m.monitoringServer)
+		process, err := NewProcessWorkload(config, m.metrics, m.monitoringServer, m.client)
 		if err != nil {
 			return err
 		}
@@ -235,6 +237,15 @@ func (m *ProcessManager) loadProcessConfigFile(configFile string) error {
 	}
 
 	return nil
+}
+
+// AddWorkload adds a process to the manager
+func (m *ProcessManager) AddWorkload(config any) error {
+	if processConfig, ok := config.(common.ProcessConfig); ok {
+		return m.AddProcess(processConfig)
+	}
+	return common.NewSevereErrorMessage("ProcessManager", fmt.Sprintf(
+		"invalid config type: %s", reflect.TypeOf(config).String()))
 }
 
 // AddProcess adds a process to the manager
@@ -256,7 +267,7 @@ func (m *ProcessManager) AddProcess(config common.ProcessConfig) error {
 	}
 
 	// Create the process workload
-	process, err := NewProcessWorkload(config, m.metrics, m.monitoringServer)
+	process, err := NewProcessWorkload(config, m.metrics, m.monitoringServer, m.client)
 	if err != nil {
 		return err
 	}
@@ -264,7 +275,7 @@ func (m *ProcessManager) AddProcess(config common.ProcessConfig) error {
 
 	// Start the process if client is available
 	if m.client != nil {
-		if err := process.Start(context.Background(), m.client); err != nil {
+		if err := process.Start(context.Background()); err != nil {
 			return fmt.Errorf("failed to start process: %w", err)
 		}
 	}
@@ -272,8 +283,51 @@ func (m *ProcessManager) AddProcess(config common.ProcessConfig) error {
 	return nil
 }
 
-// RemoveProcess removes a process from the manager
-func (m *ProcessManager) RemoveProcess(name string) error {
+// GetWorkloadsWithCRD returns all workloads from the manager with CRD
+func (m *ProcessManager) GetWorkloadsWithCRD() (res []common.Workload) {
+	m.processMutex.RLock()
+	defer m.processMutex.RUnlock()
+	for _, w := range m.processes {
+		if w.config.WorkloadCRDRef != nil {
+			res = append(res, w)
+		}
+	}
+	return
+}
+
+// GetWorkload finds a process from the manager
+func (m *ProcessManager) GetWorkload(name string) (common.Workload, bool) {
+	m.processMutex.RLock()
+	defer m.processMutex.RUnlock()
+
+	process, exists := m.processes[name]
+	if !exists {
+		return nil, exists
+	}
+
+	return process, true
+}
+
+// GetWorkloadConfig finds a process from the manager
+func (m *ProcessManager) GetWorkloadConfig(name string) (cfg common.BaseWorkloadConfig, ok bool) {
+	m.processMutex.RLock()
+	defer m.processMutex.RUnlock()
+
+	process, exists := m.processes[name]
+	if !exists {
+		return cfg, exists
+	}
+
+	return process.config.BaseWorkloadConfig, true
+}
+
+// GetConfig returns a workload info
+func (m *ProcessManager) GetConfig() common.BaseWorkloadConfig {
+	return common.BaseWorkloadConfig{}
+}
+
+// RemoveWorkload removes a process from the manager
+func (m *ProcessManager) RemoveWorkload(name string) error {
 	m.processMutex.Lock()
 	defer m.processMutex.Unlock()
 

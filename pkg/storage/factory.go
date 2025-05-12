@@ -67,6 +67,8 @@ func NewLeaderStorage(config *common.StorageConfig) (LeaderStorage, error) {
 			return nil, fmt.Errorf("database client is required for db storage")
 		}
 		return NewDBStorage(config.DBClient)
+	case common.StorageTypeMemory:
+		return NewInMemoryStorage(), nil
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", config.Type)
 	}

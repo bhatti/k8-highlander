@@ -57,9 +57,12 @@ import (
 	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 )
+
+// var _ workloads.WorkloadManager = &CronJobManager{}
 
 // CronJobManager manages multiple CronJob workloads as a single logical unit.
 // It provides coordinated lifecycle management and status aggregation for all
@@ -78,16 +81,17 @@ type CronJobManager struct {
 
 // NewCronJobManager creates a new cron job manager
 func NewCronJobManager(namespace, configDir string, metrics *monitoring.ControllerMetrics,
-	monitoringServer *monitoring.MonitoringServer) *CronJobManager {
+	monitoringServer *monitoring.MonitoringServer, client kubernetes.Interface) *CronJobManager {
 	return &CronJobManager{
 		namespace:        namespace,
 		cronJobs:         make(map[string]*CronJobWorkload),
 		configDir:        configDir,
 		metrics:          metrics,
 		monitoringServer: monitoringServer,
+		client:           client,
 		status: common.WorkloadStatus{
 			Name:    "cronjobs",
-			Type:    common.WorkloadTypeCustom,
+			Type:    common.WorkloadTypeCronJobManager,
 			Active:  false,
 			Healthy: true,
 			Details: make(map[string]interface{}),
@@ -98,9 +102,7 @@ func NewCronJobManager(namespace, configDir string, metrics *monitoring.Controll
 // Start initializes the manager and starts all registered CronJob workloads.
 // It first loads configurations from files if a config directory was provided,
 // then starts each workload with the given Kubernetes client.
-func (cm *CronJobManager) Start(ctx context.Context, client kubernetes.Interface) error {
-	cm.client = client
-
+func (cm *CronJobManager) Start(ctx context.Context) error {
 	// Load cron job configurations
 	if err := cm.loadCronJobConfigs(); err != nil {
 		return common.NewSevereError("CronJobManager", "failed to load cron job configs", err)
@@ -111,7 +113,7 @@ func (cm *CronJobManager) Start(ctx context.Context, client kubernetes.Interface
 	defer cm.cronJobMutex.RUnlock()
 
 	for _, cronJob := range cm.cronJobs {
-		if err := cronJob.Start(ctx, client); err != nil {
+		if err := cronJob.Start(ctx); err != nil {
 			klog.Errorf("Failed to start cron job %s: %v", cronJob.GetName(), err)
 		}
 	}
@@ -176,7 +178,7 @@ func (cm *CronJobManager) GetName() string {
 
 // GetType returns the type of the workload
 func (cm *CronJobManager) GetType() common.WorkloadType {
-	return common.WorkloadTypeCustom
+	return common.WorkloadTypeCronJobManager
 }
 
 // loadCronJobConfigs loads cron job configurations from files
@@ -237,7 +239,7 @@ func (cm *CronJobManager) loadCronJobConfigFile(configFile string) error {
 		}
 
 		// Create the cron job workload
-		cronJob, err := NewCronJobWorkload(config, cm.metrics, cm.monitoringServer)
+		cronJob, err := NewCronJobWorkload(config, cm.metrics, cm.monitoringServer, cm.client)
 		if err != nil {
 			return err
 		}
@@ -247,6 +249,15 @@ func (cm *CronJobManager) loadCronJobConfigFile(configFile string) error {
 	}
 
 	return nil
+}
+
+// AddWorkload adds a process to the manager
+func (cm *CronJobManager) AddWorkload(config any) error {
+	if cronConfig, ok := config.(common.CronJobConfig); ok {
+		return cm.AddCronJob(cronConfig)
+	}
+	return common.NewSevereErrorMessage("CronJobManager", fmt.Sprintf(
+		"invalid config type: %s", reflect.TypeOf(config).String()))
 }
 
 // AddCronJob adds a cron job to the manager
@@ -267,7 +278,7 @@ func (cm *CronJobManager) AddCronJob(config common.CronJobConfig) error {
 	}
 
 	// Create the cron job workload
-	cronJob, err := NewCronJobWorkload(config, cm.metrics, cm.monitoringServer)
+	cronJob, err := NewCronJobWorkload(config, cm.metrics, cm.monitoringServer, cm.client)
 	if err != nil {
 		return err
 	}
@@ -275,7 +286,7 @@ func (cm *CronJobManager) AddCronJob(config common.CronJobConfig) error {
 
 	// Start the cron job if client is available
 	if cm.client != nil {
-		if err := cronJob.Start(context.Background(), cm.client); err != nil {
+		if err := cronJob.Start(context.Background()); err != nil {
 			return fmt.Errorf("failed to start cron job: %w", err)
 		}
 	}
@@ -283,8 +294,8 @@ func (cm *CronJobManager) AddCronJob(config common.CronJobConfig) error {
 	return nil
 }
 
-// RemoveCronJob removes a cron job from the manager
-func (cm *CronJobManager) RemoveCronJob(name string) error {
+// RemoveWorkload removes a cron job from the manager
+func (cm *CronJobManager) RemoveWorkload(name string) error {
 	cm.cronJobMutex.Lock()
 	defer cm.cronJobMutex.Unlock()
 
@@ -302,6 +313,49 @@ func (cm *CronJobManager) RemoveCronJob(name string) error {
 
 	delete(cm.cronJobs, name)
 	return nil
+}
+
+// GetWorkloadsWithCRD returns all workloads from the manager
+func (cm *CronJobManager) GetWorkloadsWithCRD() (res []common.Workload) {
+	cm.cronJobMutex.RLock()
+	defer cm.cronJobMutex.RUnlock()
+	for _, w := range cm.cronJobs {
+		if w.config.WorkloadCRDRef != nil {
+			res = append(res, w)
+		}
+	}
+	return
+}
+
+// GetWorkload finds a cron job from the manager
+func (cm *CronJobManager) GetWorkload(name string) (common.Workload, bool) {
+	cm.cronJobMutex.RLock()
+	defer cm.cronJobMutex.RUnlock()
+
+	cronJob, exists := cm.cronJobs[name]
+	if !exists {
+		return nil, exists
+	}
+
+	return cronJob, true
+}
+
+// GetConfig returns a workload info
+func (cm *CronJobManager) GetConfig() common.BaseWorkloadConfig {
+	return common.BaseWorkloadConfig{}
+}
+
+// GetWorkloadConfig finds a cron job config from the manager
+func (cm *CronJobManager) GetWorkloadConfig(name string) (cfg common.BaseWorkloadConfig, ok bool) {
+	cm.cronJobMutex.RLock()
+	defer cm.cronJobMutex.RUnlock()
+
+	cronJob, exists := cm.cronJobs[name]
+	if !exists {
+		return cfg, exists
+	}
+
+	return cronJob.config.BaseWorkloadConfig, true
 }
 
 // updateStatus updates the workload status

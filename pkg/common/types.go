@@ -259,6 +259,10 @@ type LocalLeaderInfo struct {
 	ClusterName string          `json:"clusterName"`
 }
 
+func (l LocalLeaderInfo) String() string {
+	return fmt.Sprintf("Leader(name=%s, leader=%v, state=%s, cluster=%s)", l.LeaderID, l.IsLeader, l.LeaderState, l.ClusterName)
+}
+
 // contextKey is a type to avoid key collisions in context
 type contextKey string
 

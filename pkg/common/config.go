@@ -79,8 +79,9 @@ type ClusterConfig struct {
 }
 
 type ClientHolder struct {
-	clientMutex sync.RWMutex
-	client      kubernetes.Interface
+	clientMutex   sync.RWMutex
+	client        kubernetes.Interface
+	dynamicClient dynamic.Interface
 }
 
 func (c *ClusterConfig) GetClient() kubernetes.Interface {
@@ -92,13 +93,23 @@ func (c *ClusterConfig) GetClient() kubernetes.Interface {
 	return c.clientHolder.client
 }
 
-func (c *ClusterConfig) SetClient(client kubernetes.Interface) {
+func (c *ClusterConfig) GetDynamicClient() dynamic.Interface {
+	if c.clientHolder == nil {
+		return nil
+	}
+	c.clientHolder.clientMutex.RLock()
+	defer c.clientHolder.clientMutex.RUnlock()
+	return c.clientHolder.dynamicClient
+}
+
+func (c *ClusterConfig) SetClient(client kubernetes.Interface, dynamicClient dynamic.Interface) {
 	if c.clientHolder == nil {
 		c.clientHolder = &ClientHolder{}
 	}
 	c.clientHolder.clientMutex.Lock()
 	defer c.clientHolder.clientMutex.Unlock()
 	c.clientHolder.client = client
+	c.clientHolder.dynamicClient = dynamicClient
 }
 
 // CronJobConfig defines the configuration for a cron job workload
@@ -140,6 +151,8 @@ const (
 	StorageTypeRedis StorageType = "redis"
 	// StorageTypeDB represents database storage
 	StorageTypeDB StorageType = "db"
+	// StorageTypeMemory represents database storage
+	StorageTypeMemory StorageType = "memory"
 )
 
 // StorageConfig contains configuration for storage
@@ -157,10 +170,11 @@ type StorageConfig struct {
 // AppConfig defines the application configuration
 type AppConfig struct {
 	// General configuration
-	ID        string `yaml:"id"`
-	Namespace string `yaml:"namespace"`
-	Tenant    string `yaml:"tenant"`
-	Port      int    `yaml:"port" env:"PORT"`
+	ID             string `yaml:"id"`
+	Namespace      string `yaml:"namespace"`
+	Tenant         string `yaml:"tenant"`
+	Port           int    `yaml:"port" env:"PORT"`
+	RemainFollower bool   `yaml:"remainsFollower" env:"REMAINS_FOLLOWER"`
 
 	StorageType StorageType `yaml:"storageType" env:"STORAGE_TYPE"`
 
@@ -232,15 +246,22 @@ func (c *ClusterConfig) InitKubernetesClient() (err error) {
 		}
 	}
 	// Increase QPS and Burst limits to avoid rate limiting
-	c.SelectedKubeconfig.QPS = 100
-	c.SelectedKubeconfig.Burst = 100
+	c.SelectedKubeconfig.QPS = 200
+	c.SelectedKubeconfig.Burst = 200
 
 	// Create clientset
 	clientset, err := kubernetes.NewForConfig(c.SelectedKubeconfig)
 	if err != nil {
 		return fmt.Errorf("error creating kubernetes client: %w", err)
 	}
-	c.SetClient(clientset)
+	// Create a dynamic client for accessing CRDs
+	dynamicClient, err := dynamic.NewForConfig(c.SelectedKubeconfig)
+	if err != nil {
+		klog.Warningf("Failed to create dynamic client for CRD loading: %v", err)
+		return fmt.Errorf("error creating dynamic client: %w", err)
+	}
+
+	c.SetClient(clientset, dynamicClient)
 	return nil
 }
 
@@ -291,28 +312,21 @@ func InitConfig(cfgFile string) (appConfig AppConfig, err error) {
 		return appConfig, err
 	}
 
+	err = appConfig.Cluster.InitKubernetesClient()
+	if err != nil {
+		return appConfig, err
+	}
+
 	// Check if any workloads have CRD references
 	hasCRDRefs := checkForCRDReferences(&appConfig)
 
 	// If we have CRD references, we need to load them
 	if hasCRDRefs {
-		// Create a dynamic client for accessing CRDs
-		dynamicClient, err := dynamic.NewForConfig(appConfig.Cluster.SelectedKubeconfig)
-		if err != nil {
-			klog.Warningf("Failed to create dynamic client for CRD loading: %v", err)
-			return appConfig, err
-		}
-
 		// Load CRD configurations
-		if err := loadCRDConfigurations(context.Background(), &appConfig, dynamicClient); err != nil {
+		if err := loadCRDConfigurations(context.Background(), &appConfig, appConfig.Cluster.GetDynamicClient()); err != nil {
 			klog.Warningf("Failed to load CRD configurations: %v", err)
 			return appConfig, err
 		}
-	}
-
-	err = appConfig.Cluster.InitKubernetesClient()
-	if err != nil {
-		return appConfig, err
 	}
 
 	return appConfig, nil

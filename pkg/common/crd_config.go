@@ -5,6 +5,7 @@ import (
 	"fmt"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/klog/v2"
@@ -194,21 +195,21 @@ func LoadWorkloadFromCRD(ctx context.Context, dynamicClient dynamic.Interface, r
 	var resource string
 	switch ref.Kind {
 	case "WorkloadProcess":
-		resource = "workloadprocesses"
+		resource = ProcessesResource
 	case "WorkloadService":
-		resource = "workloadservices"
+		resource = ServicesResource
 	case "WorkloadCronJob":
-		resource = "workloadcronjobs"
+		resource = CronjobsResource
 	case "WorkloadPersistent":
-		resource = "workloadpersistents"
+		resource = PersistentsResource
 	default:
 		return nil, fmt.Errorf("unsupported workload CRD kind: %s", ref.Kind)
 	}
 
 	// Create the GroupVersionResource
 	gvr := schema.GroupVersionResource{
-		Group:    "highlander.plexobject.io",
-		Version:  "v1",
+		Group:    GROUP,
+		Version:  MajorVersion,
 		Resource: resource,
 	}
 
@@ -702,4 +703,60 @@ func convertToPersistentConfig(obj *unstructured.Unstructured, name, namespace s
 	}
 
 	return config, nil
+}
+
+// CreateTestScheme creates a test scheme with our CRDs registered
+func CreateTestScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+
+	// Register all the CRD types we'll be using
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadProcessList",
+	}, &unstructured.UnstructuredList{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadProcess",
+	}, &unstructured.Unstructured{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadServiceList",
+	}, &unstructured.UnstructuredList{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadService",
+	}, &unstructured.Unstructured{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadCronJobList",
+	}, &unstructured.UnstructuredList{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadCronJob",
+	}, &unstructured.Unstructured{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadPersistentList",
+	}, &unstructured.UnstructuredList{})
+
+	scheme.AddKnownTypeWithName(schema.GroupVersionKind{
+		Group:   GROUP,
+		Version: MajorVersion,
+		Kind:    "WorkloadPersistent",
+	}, &unstructured.Unstructured{})
+
+	return scheme
 }
