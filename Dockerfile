@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 # Install build dependencies
 RUN apk add --no-cache git make
 # Set working directory
@@ -15,6 +15,7 @@ ARG VERSION=dev
 ARG BUILD_TIME=unknown
 # Build the application - using the correct path to main.go
 RUN go build -ldflags "-X github.com/bhatti/k8-highlander/pkg/common.VERSION=${VERSION} -X github.com/bhatti/k8-highlander/pkg/common.BuildInfo=${BUILD_TIME}" -o bin/k8-highlander ./cmd/main.go
+
 # Runtime stage
 FROM alpine:3.18
 # Install runtime dependencies
@@ -46,9 +47,9 @@ ENV HIGHLANDER_ID="" \
     HIGHLANDER_DATABASE_URL="" \
     HIGHLANDER_KUBECONFIG="" \
     HIGHLANDER_CLUSTER_NAME="default" \
-    HIGHLANDER_NAMESPACE="default"
+    HIGHLANDER_NAMESPACE="default" \
+    CONFIG_PATH="/etc/k8-highlander/config.yaml"
 # Command to run
 ENTRYPOINT ["/app/k8-highlander"]
-# Using environment variable for config path to make it easier to override
-ENV CONFIG_PATH="/etc/k8-highlander/config.yaml"
-CMD ["--config", "${CONFIG_PATH}"]
+# Use the environment variable directly in the entrypoint
+CMD ["--config", "/etc/k8-highlander/config.yaml"]
