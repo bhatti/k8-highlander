@@ -76,7 +76,7 @@ import (
 const (
 	leaderLockKeyFormat = "highlander-leader-lock:%s" // Format: highlander-leader-lock:<tenant>
 	defaultTenant       = "default"
-	LockTTL             = 60 * time.Second
+	LockTTL             = 100 * time.Second
 	RenewInterval       = 5 * time.Second
 
 	// Constants for DB failure tolerance
@@ -937,7 +937,7 @@ func (lc *LeaderController) getCurrentLeader(ctx context.Context, attempt int) (
 	lc.metrics.RecordDBOperation("get", duration, err)
 
 	if err != nil {
-		if attempt > 3 {
+		if attempt > 2 {
 			return "", err
 		}
 		time.Sleep(1 * time.Second)
