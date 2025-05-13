@@ -17,6 +17,7 @@ workload types with reliability.
 - **Monitoring Dashboard**: Real-time visibility into controller and workload status
 - **Prometheus Metrics**: Comprehensive metrics for monitoring and alerting
 - **Storage Options**: Supports Redis or relational database for leader state storage
+- **CRD Synchronization**: Dynamically add, update, or remove workloads via Kubernetes CRDs
 
 ## 🚀 Use Cases
 
@@ -377,87 +378,193 @@ spec:
         # ... other configuration ...
 ```
 
+## 🔄 CRD Synchronization
 
+K8 Highlander includes powerful support for dynamically managing workloads through Kubernetes Custom Resource Definitions (CRDs). This allows you to add, update, or remove workloads without restarting the controller or modifying its configuration file.
 
-# k8-highlander CRD Integration Guide
+### CRD Types
 
-You can use the Custom Resource Definition (CRD) support in k8-highlander to manage workload configurations as well. This approach allows you to define workload configurations using Kubernetes native resources and reference them from your k8-highlander configuration.
+K8 Highlander supports four types of CRDs corresponding to the four workload types:
 
-## Step 1: Install the CRDs
+1. **WorkloadProcess** - For singleton processes
+2. **WorkloadCronJob** - For scheduled jobs
+3. **WorkloadService** - For deployments with services
+4. **WorkloadPersistent** - For stateful sets
 
-First, apply the CRD definitions to your Kubernetes cluster:
+### Setting Up CRD Integration
+
+#### Step 1: Install the CRDs
+
+Apply the CRD definitions to your Kubernetes cluster:
 
 ```bash
 kubectl apply -f config/highlander-crds.yaml
 ```
 
-## Step 2: Create Workload Resources
+#### Step 2: Configure RBAC Permissions
 
-Create some Custom Resources for your workloads similar to sample file:
-
-```bash
-kubectl apply -f config/sample-workload-resources.yaml
-```
-
-## Step 3: Reference CRDs in Your Configuration
-
-Update your k8-highlander configuration to reference the Custom Resources:
+Ensure K8 Highlander has the necessary permissions to watch and manage CRDs:
 
 ```yaml
-workloads:
-  processes:
-    - name: "process-name"
-      workloadCRDRef:
-        apiVersion: "highlander.plexobject.io/v1"
-        kind: "WorkloadProcess"
-        name: "singleton-process"
-        namespace: "default"
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8-highlander-crd-role
+rules:
+- apiGroups: ["highlander.plexobject.io"]
+  resources: ["workloadprocesses", "workloadcronjobs", "workloadservices", "workloadpersistents"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ```
 
-## Step 4: Start k8-highlander with CRD Support
+### Automatic CRD Sync
 
-Start k8-highlander with the CRD support enabled:
+The key advantage of K8 Highlander's CRD implementation is its automatic synchronization:
+
+- **Zero Configuration**: The controller automatically detects and synchronizes with CRD instances
+- **No Manual Referencing**: No need to explicitly reference CRDs in the K8 Highlander configuration
+- **Real-time Detection**: Changes to CRDs are detected and applied immediately
+- **Leader-Aware**: Only the active leader processes CRD changes, preventing duplication
+
+Simply add, update, or delete CRD instances, and K8 Highlander automatically handles the rest.
+
+### Managing Workloads with CRDs
+
+#### Adding a New Workload
+
+Create a CRD resource to add a new workload:
+
+```yaml
+apiVersion: highlander.plexobject.io/v1
+kind: WorkloadCronJob
+metadata:
+  name: sample-cronjob
+  namespace: default
+spec:
+  image: "busybox:latest"
+  script:
+    commands:
+      - "echo 'Running CRD-defined cron job at $(date)'"
+      - "echo 'Hostname: $(hostname)'"
+      - "sleep 15"
+    shell: "/bin/sh"
+  schedule: "*/5 * * * *"
+  env:
+    TEST_ENV: "crd-value"
+    CRD_DEFINED: "true"
+  resources:
+    cpuRequest: "50m"
+    memoryRequest: "32Mi"
+    cpuLimit: "100m"
+    memoryLimit: "64Mi"
+  restartPolicy: "OnFailure"
+```
+
+You can apply this with:
 
 ```bash
-k8-highlander --config=config.yaml
+kubectl apply -f sample-cronjob.yaml
 ```
 
-## Step 5: Check the status:
+K8 Highlander will automatically detect this new CRD instance and create the corresponding workload.
+
+#### Updating a Workload
+
+Simply update the CRD resource, and K8 Highlander will automatically detect and apply the changes:
+
+```bash
+kubectl edit workloadcronjob sample-cronjob
+```
+
+#### Removing a Workload
+
+Delete the CRD resource to remove the workload:
+
+```bash
+kubectl delete workloadcronjob sample-cronjob
+```
+
+K8 Highlander will detect the deletion and safely shut down and remove the corresponding workload.
+
+### Using Helper Scripts
+
+K8 Highlander includes helper scripts to simplify CRD management:
+
+#### Create a CronJob Workload
+
+```bash
+./scripts/create-cronjob-crd.sh --name=my-cronjob --namespace=default \
+  --image=busybox:latest --schedule="*/5 * * * *"
+```
+
+The script supports the following parameters:
+
+```
+--name             # Required: Name of the CronJob
+--namespace        # Optional: Namespace (default: "default")
+--image            # Optional: Container image (default: "busybox:latest")
+--shell            # Optional: Shell for the script (default: "/bin/sh")
+--schedule         # Optional: Cron schedule (default: "*/1 * * * *")
+--restart-policy   # Optional: Restart policy (default: "OnFailure")
+--cpu-request      # Optional: CPU request (default: "50m")
+--memory-request   # Optional: Memory request (default: "32Mi")
+--cpu-limit        # Optional: CPU limit (default: "100m")
+--memory-limit     # Optional: Memory limit (default: "64Mi")
+```
+
+#### Delete a Workload
+
+```bash
+./scripts/delete-workload-crd.sh --name=my-cronjob --kind=WorkloadCronJob
+```
+
+The script supports the following parameters:
+
+```
+--name       # Required: Name of the workload
+--namespace  # Optional: Namespace (default: "default")
+--kind       # Required: One of WorkloadProcess, WorkloadCronJob, WorkloadService, or WorkloadPersistent
+```
+
+### Monitoring CRD Workloads
+
+CRD-managed workloads appear in the K8 Highlander dashboard like any other workload. You can also check their status with:
 
 ```bash
 kubectl get workloadprocesses
+kubectl get workloadcronjobs
+kubectl get workloadservices
+kubectl get workloadpersistents
 ```
 
-You'll see the status reflecting the current state of the workload:
+Each resource includes status fields showing whether it's active and healthy:
 
 ```
-NAME               ACTIVE   HEALTHY   AGE
-singleton-process  true     true      5m
+NAME           ACTIVE   HEALTHY   AGE
+sample-cronjob true     true      5m
 ```
 
-## Troubleshooting
+### GitOps Integration
 
-If you encounter issues with the CRD integration, check the following:
+K8 Highlander's CRD support enables seamless GitOps workflows:
 
-1. **CRDs are installed**: Verify that the CRDs are properly installed in your cluster.
-   ```bash
-   kubectl get crd | grep highlander
-   ```
+1. **Declarative Workload Management**: Define workloads as Kubernetes resources stored in Git
+2. **Automated Deployment**: Use CI/CD systems to apply workload CRDs to your cluster
+3. **Version Control**: Track workload changes through Git history
+4. **Pull Request Workflow**: Review workload changes before they're applied
+5. **Automatic Synchronization**: No additional steps to inform K8 Highlander of changes
 
-2. **Custom Resources exist**: Make sure the Custom Resources exist in the expected namespace.
-   ```bash
-   kubectl get workloadprocesses -n your-namespace
-   ```
+### CRD Synchronization Architecture
 
-3. **CRD references are correct**: Check that the references in your configuration match the actual Custom Resources.
+K8 Highlander's CRD synchronization works through the following mechanism:
 
-4. **k8-highlander logs**: Check the k8-highlander logs for any errors related to CRD loading.
-   ```bash
-   kubectl logs -n your-namespace deployment/k8-highlander
-   ```
+1. **CRD Watcher**: Continuously monitors for changes to CRD resources
+2. **Dynamic Registration**: Automatically registers new workloads when CRDs are created
+3. **Real-time Updates**: Applies changes to workloads when CRDs are updated
+4. **Clean Removal**: Safely shuts down and removes workloads when CRDs are deleted
+5. **Leader-Aware**: Only the active leader instance processes CRD changes
+6. **State Recovery**: Recovers workload state after leader changes
 
-5. **Permissions**: Ensure that k8-highlander has the necessary permissions to read and update the Custom Resources.
-
+This architecture ensures seamless synchronization between Kubernetes CRDs and K8 Highlander workloads, enabling GitOps workflows and external management of singleton workloads.
 
 ## 🤝 Contributing
 

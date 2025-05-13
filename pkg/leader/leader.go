@@ -332,7 +332,7 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 	startTime := time.Now()
 
 	// Get the current leader (if any) before we try to acquire
-	currentLeader, err := lc.getCurrentLeader(ctx)
+	currentLeader, err := lc.getCurrentLeader(ctx, 0)
 	if err != nil {
 		klog.Warningf("Error getting current leader: %v  (failure count: %d)", err, lc.getDBFailures())
 
@@ -435,7 +435,7 @@ func (lc *LeaderController) TryAcquireLeadership(ctx context.Context) bool {
 		// Store our ID for restart detection
 		lc.previousSelfID = lc.id
 
-		verifyLeader, verifyErr := lc.getCurrentLeader(ctx)
+		verifyLeader, verifyErr := lc.getCurrentLeader(ctx, 0)
 		if verifyErr != nil {
 			klog.Errorf("Error verifying leadership acquisition: %v [elapsed %s]", verifyErr, time.Since(startTime))
 		} else if verifyLeader != lc.id {
@@ -864,7 +864,7 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 						common.GetElapsedTime(ctx))
 
 					// Get the new leader (if any)
-					newLeader, err := lc.getCurrentLeader(ctx)
+					newLeader, err := lc.getCurrentLeader(ctx, 0)
 
 					if err != nil {
 						klog.Warningf("Could not get current leader after losing during renewal: %s [elapsed: %s]",
@@ -887,7 +887,7 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 				}
 			} else {
 				// First, get the current leader for proper transition tracking
-				previousLeader, _ := lc.getCurrentLeader(ctx)
+				previousLeader, _ := lc.getCurrentLeader(ctx, 0)
 				// If we're not the leader, try to acquire
 				if lc.TryAcquireLeadership(ctx) {
 					klog.Infof("Leadership acquired on cluster %s [elapsed: %s]",
@@ -928,7 +928,7 @@ func (lc *LeaderController) runLeaderElectionLoop(ctx context.Context) {
 }
 
 // getCurrentLeader gets the current leader's ID from storage
-func (lc *LeaderController) getCurrentLeader(ctx context.Context) (string, error) {
+func (lc *LeaderController) getCurrentLeader(ctx context.Context, attempt int) (string, error) {
 	startTime := time.Now()
 	val, err := lc.storage.GetLockValue(ctx, lc.leaderLockKey)
 	duration := time.Since(startTime)
@@ -937,7 +937,11 @@ func (lc *LeaderController) getCurrentLeader(ctx context.Context) (string, error
 	lc.metrics.RecordDBOperation("get", duration, err)
 
 	if err != nil {
-		return "", err
+		if attempt > 3 {
+			return "", err
+		}
+		time.Sleep(1 * time.Second)
+		return lc.getCurrentLeader(ctx, attempt+1)
 	}
 
 	if val == "" {
