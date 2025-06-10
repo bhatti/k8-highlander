@@ -69,15 +69,16 @@ func (s *Server) setupStaticFileServer(mux *http.ServeMux) {
 		path := r.URL.Path
 
 		// Serve index.html for the root path
-		if path == "/" {
-			path = "/dashboard.html"
+		if path == "/" || path == "/dashboard" {
+			HandleDashboard(w, r)
+			return
 		}
 
 		// Remove leading slash for the filesystem lookup
 		path = strings.TrimPrefix(path, "/")
 
 		// Check if the file exists
-		_, err := fs.Stat(staticFS, path)
+		_, err = fs.Stat(staticFS, path)
 		if err != nil {
 			// If the file doesn't exist, serve dashboard.html for SPA routing
 			if strings.HasPrefix(path, "api/") {
@@ -92,4 +93,91 @@ func (s *Server) setupStaticFileServer(mux *http.ServeMux) {
 		r.URL.Path = "/" + path
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// getDashboardHTML returns the dashboard HTML content
+func getDashboardHTML() ([]byte, error) {
+	staticFS, err := getStaticFS()
+	if err != nil {
+		return nil, err
+	}
+
+	content, err := fs.ReadFile(staticFS, "dashboard.html")
+	if err != nil {
+		return nil, err
+	}
+
+	return content, nil
+}
+
+// HandleDashboard serves the dashboard HTML with embedded filesystem
+func HandleDashboard(w http.ResponseWriter, r *http.Request) {
+	staticFS, err := getStaticFS()
+	if err != nil {
+		klog.Errorf("Failed to get static filesystem: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	path := r.URL.Path
+
+	// Serve dashboard.html for the root path
+	if path == "/" {
+		path = "/dashboard.html"
+	}
+
+	// Remove leading slash for the filesystem lookup
+	path = strings.TrimPrefix(path, "/")
+
+	// Check if the file exists
+	_, err = fs.Stat(staticFS, path)
+	if err != nil {
+		// If the file doesn't exist, serve dashboard.html for SPA routing
+		if strings.HasPrefix(path, "api/") {
+			// For API paths, return 404
+			http.NotFound(w, r)
+			return
+		}
+		path = "dashboard.html"
+	}
+
+	// Read and serve the file
+	content, err := fs.ReadFile(staticFS, path)
+	if err != nil {
+		klog.Errorf("Failed to read file %s: %v", path, err)
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	// Set appropriate content type
+	contentType := getContentType(path)
+	w.Header().Set("Content-Type", contentType)
+
+	w.Write(content)
+}
+
+// getContentType returns the appropriate content type for a file
+func getContentType(filename string) string {
+	switch {
+	case strings.HasSuffix(filename, ".html"):
+		return "text/html"
+	case strings.HasSuffix(filename, ".css"):
+		return "text/css"
+	case strings.HasSuffix(filename, ".js"):
+		return "application/javascript"
+	case strings.HasSuffix(filename, ".json"):
+		return "application/json"
+	case strings.HasSuffix(filename, ".png"):
+		return "image/png"
+	case strings.HasSuffix(filename, ".jpg"), strings.HasSuffix(filename, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(filename, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(filename, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(filename, ".ico"):
+		return "image/x-icon"
+	default:
+		return "text/plain"
+	}
 }

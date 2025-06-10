@@ -69,6 +69,11 @@ func NewLeaderStorage(config *common.StorageConfig) (LeaderStorage, error) {
 		return NewDBStorage(config.DBClient)
 	case common.StorageTypeMemory:
 		return NewInMemoryStorage(), nil
+	case common.StorageTypeSpanner:
+		if config.SpannerClient == nil {
+			return nil, fmt.Errorf("spanner client is required for spanner storage")
+		}
+		return NewSpannerStorage(config.SpannerClient)
 	default:
 		return nil, fmt.Errorf("unsupported storage type: %s", config.Type)
 	}

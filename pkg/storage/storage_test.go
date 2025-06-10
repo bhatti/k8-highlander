@@ -1,16 +1,22 @@
 package storage
 
 import (
+	database "cloud.google.com/go/spanner/admin/database/apiv1"
+	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
+	instanceadmin "cloud.google.com/go/spanner/admin/instance/apiv1"
+	"cloud.google.com/go/spanner/admin/instance/apiv1/instancepb"
 	"context"
 	"fmt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"math/rand"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/spanner"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
@@ -79,6 +85,148 @@ func setupDBStorage(t *testing.T) (*DBStorage, func()) {
 	}
 }
 
+func setupSpannerStorage(t *testing.T) (*SpannerStorage, func()) {
+
+	// uncomment for testing
+	_ = os.Setenv("SPANNER_EMULATOR_HOST", "localhost:9010")
+
+	// Check if Spanner emulator is available
+	spannerEmulatorHost := os.Getenv("SPANNER_EMULATOR_HOST")
+	if spannerEmulatorHost == "" {
+		t.Skip("Spanner emulator not available. Set SPANNER_EMULATOR_HOST=localhost:9010 and start emulator")
+	}
+
+	projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+	if projectID == "" {
+		projectID = "test-project"
+	}
+
+	instanceID := "test-instance"
+	databaseID := "test-database"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Create admin clients to set up instance and database
+	instanceAdmin, err := instanceadmin.NewInstanceAdminClient(ctx)
+	if err != nil {
+		t.Skipf("Failed to create instance admin client: %v", err)
+	}
+	defer instanceAdmin.Close()
+
+	databaseAdmin, err := database.NewDatabaseAdminClient(ctx)
+	if err != nil {
+		t.Skipf("Failed to create database admin client: %v", err)
+	}
+	defer databaseAdmin.Close()
+
+	// Create instance if it doesn't exist
+	instancePath := fmt.Sprintf("projects/%s/instances/%s", projectID, instanceID)
+	_, err = instanceAdmin.GetInstance(ctx, &instancepb.GetInstanceRequest{
+		Name: instancePath,
+	})
+	if err != nil {
+		// Instance doesn't exist, create it
+		t.Logf("Creating Spanner instance: %s", instancePath)
+		op, err := instanceAdmin.CreateInstance(ctx, &instancepb.CreateInstanceRequest{
+			Parent:     fmt.Sprintf("projects/%s", projectID),
+			InstanceId: instanceID,
+			Instance: &instancepb.Instance{
+				Config:      fmt.Sprintf("projects/%s/instanceConfigs/emulator-config", projectID),
+				DisplayName: "Test Instance",
+				NodeCount:   1,
+			},
+		})
+		if err != nil {
+			t.Skipf("Failed to create instance: %v", err)
+		}
+
+		_, err = op.Wait(ctx)
+		if err != nil {
+			t.Skipf("Failed to wait for instance creation: %v", err)
+		}
+		t.Logf("Successfully created instance: %s", instancePath)
+	}
+
+	// Create database if it doesn't exist
+	databasePath := fmt.Sprintf("projects/%s/instances/%s/databases/%s", projectID, instanceID, databaseID)
+	_, err = databaseAdmin.GetDatabase(ctx, &databasepb.GetDatabaseRequest{
+		Name: databasePath,
+	})
+	if err != nil {
+		// Database doesn't exist, create it with the table
+		t.Logf("Creating Spanner database: %s", databasePath)
+		ddlStatements := []string{
+			`CREATE TABLE LeaderLocks (
+				LockKey STRING(MAX) NOT NULL,
+				LockValue STRING(MAX) NOT NULL,
+				ClusterName STRING(MAX) NOT NULL,
+				MetadataJson STRING(MAX),
+				CreatedAt TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+				UpdatedAt TIMESTAMP NOT NULL OPTIONS (allow_commit_timestamp=true),
+				ExpiresAt TIMESTAMP NOT NULL,
+				LockVersion INT64 NOT NULL
+			) PRIMARY KEY (LockKey)`,
+			`CREATE INDEX IdxLeaderLocksExpiresAt ON LeaderLocks (ExpiresAt)`,
+			`CREATE INDEX IdxLeaderLocksLockValue ON LeaderLocks (LockValue)`,
+		}
+
+		op, err := databaseAdmin.CreateDatabase(ctx, &databasepb.CreateDatabaseRequest{
+			Parent:          fmt.Sprintf("projects/%s/instances/%s", projectID, instanceID),
+			CreateStatement: fmt.Sprintf("CREATE DATABASE `%s`", databaseID),
+			ExtraStatements: ddlStatements,
+		})
+		if err != nil {
+			t.Skipf("Failed to create database: %v", err)
+		}
+
+		_, err = op.Wait(ctx)
+		if err != nil {
+			t.Skipf("Failed to wait for database creation: %v", err)
+		}
+		t.Logf("Successfully created database: %s", databasePath)
+	}
+
+	// Create data client
+	client, err := spanner.NewClient(ctx, databasePath)
+	if err != nil {
+		t.Skipf("Failed to create Spanner client: %v", err)
+	}
+
+	// Create storage (this should now work since database exists)
+	storage, err := NewSpannerStorage(client)
+	if err != nil {
+		client.Close()
+		t.Skipf("Failed to create Spanner storage: %v", err)
+	}
+
+	// Return the storage and a cleanup function
+	return storage, func() {
+		// Clean up test data
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Delete all test data
+		_, err := client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+			stmt := spanner.NewStatement("DELETE FROM LeaderLocks WHERE TRUE")
+			_, err := txn.Update(ctx, stmt)
+			return err
+		})
+		if err != nil {
+			t.Logf("Warning: Failed to clean up Spanner test data: %v", err)
+		}
+
+		client.Close()
+	}
+}
+
+func setupMemoryStorage(t *testing.T) (*InMemoryStorage, func()) {
+	storage := NewInMemoryStorage()
+	return storage, func() {
+		storage.Close()
+	}
+}
+
 func TestRedisStorage(t *testing.T) {
 	storage, mr, cleanup := setupRedisStorage(t)
 	defer cleanup()
@@ -88,6 +236,20 @@ func TestRedisStorage(t *testing.T) {
 
 func TestDBStorage(t *testing.T) {
 	storage, cleanup := setupDBStorage(t)
+	defer cleanup()
+
+	testStorage(t, storage, nil)
+}
+
+func TestSpannerStorage(t *testing.T) {
+	storage, cleanup := setupSpannerStorage(t)
+	defer cleanup()
+
+	testStorage(t, storage, nil)
+}
+
+func TestMemoryStorage(t *testing.T) {
+	storage, cleanup := setupMemoryStorage(t)
 	defer cleanup()
 
 	testStorage(t, storage, nil)
@@ -150,7 +312,7 @@ func testStorage(t *testing.T, storage LeaderStorage, mr *miniredis.Miniredis) {
 	assert.Equal(t, cluster1, info.ClusterName, "Cluster name should match")
 	assert.True(t, info.TTL > 0, "Lock TTL should be positive")
 
-	// For DB storage, version should be incremented
+	// For DB and Spanner storage, version should be incremented
 	// For Redis storage, version might be incremented depending on implementation
 	assert.True(t, info.Version >= initialVersion,
 		"Version should not decrease (initial: %d, current: %d)",
@@ -176,7 +338,7 @@ func testStorage(t *testing.T, storage LeaderStorage, mr *miniredis.Miniredis) {
 	require.NoError(t, err)
 	assert.False(t, success, "Should not release lock that's already released")
 
-	// Test lock expiration (only for Redis, as DB expiration is handled by a background goroutine)
+	// Test lock expiration (only for Redis, as DB/Spanner expiration is handled by background routines)
 	if mr != nil {
 		// Acquire lock with short TTL
 		success, err = storage.TryAcquireLock(ctx, key, value1, cluster1, 100*time.Millisecond)
@@ -207,7 +369,7 @@ func testStorage(t *testing.T, storage LeaderStorage, mr *miniredis.Miniredis) {
 
 // TestConcurrentLockAcquisition tests that only one goroutine can acquire a lock
 func TestConcurrentLockAcquisition(t *testing.T) {
-	// Test with both storage types
+	// Test with all storage types
 	t.Run("Redis", func(t *testing.T) {
 		storage, _, cleanup := setupRedisStorage(t)
 		defer cleanup()
@@ -219,6 +381,18 @@ func TestConcurrentLockAcquisition(t *testing.T) {
 		defer cleanup()
 		testConcurrentLockAcquisition(t, storage)
 	})
+
+	t.Run("Spanner", func(t *testing.T) {
+		storage, cleanup := setupSpannerStorage(t)
+		defer cleanup()
+		testConcurrentLockAcquisition(t, storage)
+	})
+
+	t.Run("Memory", func(t *testing.T) {
+		storage, cleanup := setupMemoryStorage(t)
+		defer cleanup()
+		testConcurrentLockAcquisition(t, storage)
+	})
 }
 
 func testConcurrentLockAcquisition(t *testing.T, storage LeaderStorage) {
@@ -226,10 +400,13 @@ func testConcurrentLockAcquisition(t *testing.T, storage LeaderStorage) {
 	key := "concurrent-test-key"
 	ttl := 10 * time.Second
 
-	// Reduce number of goroutines for SQLite
+	// Reduce number of goroutines for SQLite and Spanner
 	numGoroutines := 3
 	if _, ok := storage.(*DBStorage); ok {
 		numGoroutines = 2 // Even fewer for SQLite
+	}
+	if _, ok := storage.(*SpannerStorage); ok {
+		numGoroutines = 2 // Fewer for Spanner as well
 	}
 
 	// Channel to collect results
@@ -239,11 +416,14 @@ func testConcurrentLockAcquisition(t *testing.T, storage LeaderStorage) {
 	var wg sync.WaitGroup
 	wg.Add(numGoroutines)
 
-	// Launch goroutines sequentially with delays for SQLite
+	// Launch goroutines sequentially with delays for SQLite and Spanner
 	for i := 0; i < numGoroutines; i++ {
-		// Add delay between goroutine launches for SQLite
+		// Add delay between goroutine launches for SQLite and Spanner
 		if _, ok := storage.(*DBStorage); ok {
 			time.Sleep(50 * time.Millisecond)
+		}
+		if _, ok := storage.(*SpannerStorage); ok {
+			time.Sleep(100 * time.Millisecond) // Longer delay for Spanner
 		}
 
 		go func(id int) {
@@ -295,7 +475,7 @@ func testConcurrentLockAcquisition(t *testing.T, storage LeaderStorage) {
 
 // TestConcurrentLockRenewal tests that concurrent renewals are handled correctly
 func TestConcurrentLockRenewal(t *testing.T) {
-	// Test with both storage types
+	// Test with all storage types
 	t.Run("Redis", func(t *testing.T) {
 		storage, _, cleanup := setupRedisStorage(t)
 		defer cleanup()
@@ -304,6 +484,18 @@ func TestConcurrentLockRenewal(t *testing.T) {
 
 	t.Run("DB", func(t *testing.T) {
 		storage, cleanup := setupDBStorage(t)
+		defer cleanup()
+		testConcurrentLockRenewal(t, storage)
+	})
+
+	t.Run("Spanner", func(t *testing.T) {
+		storage, cleanup := setupSpannerStorage(t)
+		defer cleanup()
+		testConcurrentLockRenewal(t, storage)
+	})
+
+	t.Run("Memory", func(t *testing.T) {
+		storage, cleanup := setupMemoryStorage(t)
 		defer cleanup()
 		testConcurrentLockRenewal(t, storage)
 	})
@@ -327,7 +519,10 @@ func testConcurrentLockRenewal(t *testing.T, storage LeaderStorage) {
 	require.NotNil(t, initialInfo, "Lock info should not be nil")
 
 	// Number of concurrent goroutines trying to renew the lock
-	numGoroutines := 3 // Reduced for SQLite
+	numGoroutines := 3
+	if _, ok := storage.(*SpannerStorage); ok {
+		numGoroutines = 2 // Fewer for Spanner
+	}
 
 	// Channel to collect results
 	results := make(chan bool, numGoroutines)
@@ -344,7 +539,7 @@ func testConcurrentLockRenewal(t *testing.T, storage LeaderStorage) {
 			// Add a small random delay to increase chance of concurrency
 			time.Sleep(time.Duration(rand.Intn(20)) * time.Millisecond)
 
-			// Use retry with backoff for SQLite
+			// Use retry with backoff for SQLite and Spanner
 			var success bool
 			var err error
 
@@ -409,7 +604,7 @@ func testConcurrentLockRenewal(t *testing.T, storage LeaderStorage) {
 
 // TestLockExpiration tests that expired locks can be reacquired
 func TestLockExpiration(t *testing.T) {
-	// Test with both storage types
+	// Test with all storage types
 	t.Run("Redis", func(t *testing.T) {
 		storage, mr, cleanup := setupRedisStorage(t)
 		defer cleanup()
@@ -418,6 +613,18 @@ func TestLockExpiration(t *testing.T) {
 
 	t.Run("DB", func(t *testing.T) {
 		storage, cleanup := setupDBStorage(t)
+		defer cleanup()
+		testLockExpiration(t, storage, nil)
+	})
+
+	t.Run("Spanner", func(t *testing.T) {
+		storage, cleanup := setupSpannerStorage(t)
+		defer cleanup()
+		testLockExpiration(t, storage, nil)
+	})
+
+	t.Run("Memory", func(t *testing.T) {
+		storage, cleanup := setupMemoryStorage(t)
 		defer cleanup()
 		testLockExpiration(t, storage, nil)
 	})
@@ -440,15 +647,29 @@ func testLockExpiration(t *testing.T, storage LeaderStorage, mr *miniredis.Minir
 	if mr != nil {
 		mr.FastForward(shortTTL * 2)
 	} else {
-		// For DB, we need to wait for the TTL to expire
-		// This is a bit flaky in tests, so we'll manually delete the lock
-		// to simulate expiration
-		dbStorage, ok := storage.(*DBStorage)
-		require.True(t, ok, "Expected DBStorage")
-
-		// Use GORM's Exec to directly execute SQL
-		err := dbStorage.db.Exec("DELETE FROM leader_locks WHERE key = ?", key).Error
-		require.NoError(t, err)
+		// For other storage types, simulate expiration by manually deleting the lock
+		if dbStorage, ok := storage.(*DBStorage); ok {
+			// Use GORM's Exec to directly execute SQL
+			err := dbStorage.db.Exec("DELETE FROM leader_locks WHERE key = ?", key).Error
+			require.NoError(t, err)
+		} else if spannerStorage, ok := storage.(*SpannerStorage); ok {
+			// Use Spanner transaction to delete the lock
+			_, err := spannerStorage.client.ReadWriteTransaction(ctx, func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
+				stmt := spanner.NewStatement("DELETE FROM LeaderLocks WHERE LockKey = @key")
+				stmt.Params["key"] = key
+				_, err := txn.Update(ctx, stmt)
+				return err
+			})
+			require.NoError(t, err)
+		} else if memStorage, ok := storage.(*InMemoryStorage); ok {
+			// For memory storage, we can simulate expiration by manipulating the expiration time
+			memStorage.mu.Lock()
+			if entry, exists := memStorage.locks[key]; exists {
+				entry.ExpiresAt = time.Now().Add(-time.Hour) // Set to past time
+				memStorage.locks[key] = entry
+			}
+			memStorage.mu.Unlock()
+		}
 	}
 
 	// After expiration, a different client should be able to acquire the lock
@@ -468,11 +689,29 @@ func testLockExpiration(t *testing.T, storage LeaderStorage, mr *miniredis.Minir
 	assert.True(t, success, "Should release lock successfully")
 }
 
-// TestDBVersionIncrement tests that the version is properly incremented in DB storage
-func TestDBVersionIncrement(t *testing.T) {
-	storage, cleanup := setupDBStorage(t)
-	defer cleanup()
+// TestVersionIncrement tests that the version is properly incremented in storage implementations
+func TestVersionIncrement(t *testing.T) {
+	// Test with storage types that support versioning
+	t.Run("DB", func(t *testing.T) {
+		storage, cleanup := setupDBStorage(t)
+		defer cleanup()
+		testVersionIncrement(t, storage)
+	})
 
+	t.Run("Spanner", func(t *testing.T) {
+		storage, cleanup := setupSpannerStorage(t)
+		defer cleanup()
+		testVersionIncrement(t, storage)
+	})
+
+	t.Run("Memory", func(t *testing.T) {
+		storage, cleanup := setupMemoryStorage(t)
+		defer cleanup()
+		testVersionIncrement(t, storage)
+	})
+}
+
+func testVersionIncrement(t *testing.T, storage LeaderStorage) {
 	ctx := context.Background()
 	key := "version-test-key"
 	value := "version-test-value"
@@ -509,6 +748,53 @@ func TestDBVersionIncrement(t *testing.T) {
 		initialVersion, finalVersion)
 
 	// Release the lock
+	success, err = storage.ReleaseLock(ctx, key, value)
+	require.NoError(t, err)
+	assert.True(t, success, "Should release lock successfully")
+}
+
+// TestSpannerSpecificFeatures tests Spanner-specific functionality
+func TestSpannerSpecificFeatures(t *testing.T) {
+	storage, cleanup := setupSpannerStorage(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	key := "spanner-test-key"
+	value := "spanner-test-value"
+	clusterName := "spanner-test-cluster"
+	ttl := 10 * time.Second
+
+	// Test that commit timestamps are used
+	success, err := storage.TryAcquireLock(ctx, key, value, clusterName, ttl)
+	require.NoError(t, err)
+	require.True(t, success, "Should acquire lock successfully")
+
+	info, err := storage.GetLockInfo(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, info, "Lock info should not be nil")
+
+	// CreatedAt and UpdatedAt should be set
+	assert.False(t, info.CreatedAt.IsZero(), "CreatedAt should be set")
+	assert.False(t, info.UpdatedAt.IsZero(), "UpdatedAt should be set")
+
+	// Test renewal updates the timestamp
+	originalUpdatedAt := info.UpdatedAt
+
+	// Wait a bit to ensure timestamp difference
+	time.Sleep(100 * time.Millisecond)
+
+	success, err = storage.RenewLock(ctx, key, value, ttl)
+	require.NoError(t, err)
+	require.True(t, success, "Should renew lock successfully")
+
+	info, err = storage.GetLockInfo(ctx, key)
+	require.NoError(t, err)
+	require.NotNil(t, info, "Lock info should not be nil")
+
+	// UpdatedAt should have changed
+	assert.True(t, info.UpdatedAt.After(originalUpdatedAt), "UpdatedAt should be updated on renewal")
+
+	// Clean up
 	success, err = storage.ReleaseLock(ctx, key, value)
 	require.NoError(t, err)
 	assert.True(t, success, "Should release lock successfully")

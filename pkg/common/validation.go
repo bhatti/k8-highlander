@@ -307,7 +307,10 @@ func (cfg *AppConfig) Validate() error {
 		cfg.TerminationGracePeriod = time.Second * 29
 	}
 	// Validate storage type
-	if cfg.StorageType != "" && cfg.StorageType != StorageTypeRedis && cfg.StorageType != StorageTypeDB {
+	if cfg.StorageType != "" &&
+		cfg.StorageType != StorageTypeRedis &&
+		cfg.StorageType != StorageTypeSpanner &&
+		cfg.StorageType != StorageTypeDB {
 		return fmt.Errorf("invalid storage type: %s", cfg.StorageType)
 	}
 
@@ -324,6 +327,19 @@ func (cfg *AppConfig) Validate() error {
 			return fmt.Errorf("database URL is required when using DB storage")
 		}
 	}
+
+	if cfg.StorageType == StorageTypeSpanner {
+		if cfg.Spanner.ProjectID == "" {
+			return fmt.Errorf("spanner projectID is required for Spanner storage")
+		}
+		if cfg.Spanner.InstanceID == "" {
+			return fmt.Errorf("spanner instanceID is required for Spanner storage")
+		}
+		if cfg.Spanner.DatabaseID == "" {
+			return fmt.Errorf("spanner databaseID is required for Spanner storage")
+		}
+	}
+
 	if cfg.Cluster.Name == "" {
 		return fmt.Errorf("cluster name is not specified")
 	}

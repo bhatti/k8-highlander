@@ -6,6 +6,7 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 GOLINT=golangci-lint
+#
 # Binary name
 BINARY_NAME=k8-highlander
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -89,6 +90,7 @@ ensure-static:
 .PHONY: dashboard
 dashboard: ensure-static
 	cp -r dashboard/* static/
+#
 # Build with dashboard files included
 .PHONY: build-full
 build-full: dashboard build

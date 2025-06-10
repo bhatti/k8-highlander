@@ -16,13 +16,32 @@ workload types with reliability.
 - **Multi-Tenant Support**: Run multiple isolated controller groups with separate leadership
 - **Monitoring Dashboard**: Real-time visibility into controller and workload status
 - **Prometheus Metrics**: Comprehensive metrics for monitoring and alerting
-- **Storage Options**: Supports Redis or relational database for leader state storage
+- **Storage Options**: Supports Redis, relational databases, or Google Cloud Spanner for leader state storage
+- **Serverless Deployment**: Deploy as Google Cloud Functions for zero-infrastructure management
 - **CRD Synchronization**: Dynamically add, update, or remove workloads via Kubernetes CRDs
 
 ## 🚀 Use Cases
 
 K8 Highlander is designed for scenarios where you need to ensure only one instance of a 
 process is running across your Kubernetes cluster:
+
+### Serverless/Multi-Cloud Scenarios
+
+- **Cloud-native deployments** without Kubernetes infrastructure
+- **Hybrid environments** spanning on-premises and cloud
+- **Cost-optimized setups** with serverless execution
+- **Global leader election** across multiple regions using Spanner
+
+```yaml
+# Cloud Function configuration
+deployment:
+  type: "cloudfunction"
+  storage: "spanner"
+  spanner:
+    projectID: "my-project"
+    instanceID: "highlander-instance"
+    databaseID: "highlander-db"
+```
 
 ### Process Workloads
 
@@ -125,9 +144,16 @@ persistentSets:
 
 ### Prerequisites
 
-- Kubernetes cluster (v1.16+)
-- Redis server or PostgreSQL database for leader state storage
-- kubectl configured to access your cluster
+- **For Kubernetes deployment:**
+  - Kubernetes cluster (v1.16+)
+  - Redis server, PostgreSQL database, or Google Cloud Spanner for leader state storage
+  - kubectl configured to access your cluster
+
+- **For Cloud Function deployment:**
+  - Google Cloud Project with billing enabled
+  - gcloud CLI installed and authenticated
+  - Cloud Functions and Spanner APIs enabled
+```
 
 ### Using Helm
 
@@ -168,6 +194,29 @@ docker run -d --name k8-highlander \
   plexobject/k8-highlander:latest
 ```
 
+### Using Google Cloud Functions
+
+For serverless deployment without managing infrastructure:
+
+```bash
+# Clone the repository
+git clone https://github.com/bhatti/k8-highlander.git
+cd k8-highlander/functions/highlander
+
+# Setup and deploy
+./setup.sh
+make setup      # Creates Spanner instance (costs ~$65/month)
+make deploy-dev # Deploy development function
+make test-real  # Test the deployment
+
+# Get function URL
+make get-url-dev
+```
+
+**Free testing with emulator:**
+```bash
+make test-emulator  # Completely free local testing
+```
 ## 🔧 Configuration
 
 K8 Highlander can be configured using a YAML configuration file and/or environment variables.
@@ -182,12 +231,17 @@ port: 8080
 namespace: "default"
 
 # Storage configuration
-storageType: "redis"  # "redis" or "db"
+# Storage configuration
+storageType: "redis"  # "redis", "db", or "spanner"
 redis:
   addr: "redis-host:6379"
   password: ""
   db: 0
 databaseURL: ""  # Used if storageType is "db"
+spanner:         # Used if storageType is "spanner"
+  projectID: "my-gcp-project"
+  instanceID: "highlander-instance"
+  databaseID: "highlander-db"
 
 # Cluster configuration
 cluster:
@@ -228,7 +282,28 @@ workloads:
 | `HIGHLANDER_KUBECONFIG` | Path to kubeconfig file | `""` |
 | `HIGHLANDER_CLUSTER_NAME` | Cluster name | `default` |
 | `HIGHLANDER_NAMESPACE` | Kubernetes namespace | `default` |
+| `HIGHLANDER_SPANNER_PROJECT_ID` | GCP Project ID for Spanner | `""` |
+| `HIGHLANDER_SPANNER_INSTANCE_ID` | Spanner instance ID | `highlander-instance` |
+| `HIGHLANDER_SPANNER_DATABASE_ID` | Spanner database ID | `highlander-db` |
 
+## Configuration Examples
+
+### Cloud Function Configuration
+
+```yaml
+# Cloud Function specific config
+storageType: "spanner"
+spanner:
+  projectID: "my-gcp-project"
+  instanceID: "highlander-instance"
+  databaseID: "highlander-db"
+
+# Workloads still supported but managed remotely
+workloads:
+  processes:
+    - name: "serverless-processor"
+      # ... configuration ...
+```
 ## 📊 Monitoring
 
 K8 Highlander provides a built-in dashboard and Prometheus metrics for monitoring.
@@ -274,6 +349,19 @@ Key metrics include:
 - Check Redis connectivity from all instances
 - Verify leader lock TTL settings (default: 15s)
 
+### Spanner Issues
+
+#### Spanner Connection Failed
+- Check GCP credentials: `gcloud auth list`
+- Verify Spanner instance exists: `gcloud spanner instances describe highlander-instance`
+- Check service account permissions: `roles/spanner.databaseUser`
+- Test connectivity: `gcloud spanner databases execute-sql highlander-db --instance=highlander-instance --sql="SELECT 1"`
+
+#### Cloud Function Issues
+- Check function logs: `make logs-dev`
+- Verify environment variables: `gcloud functions describe highlander-api-dev --format="table(serviceConfig.environmentVariables)"`
+- Test function directly: `curl https://FUNCTION_URL/healthz`
+
 ### Debugging
 
 Enable debug logging by setting the environment variable:
@@ -314,6 +402,26 @@ workloads:
         cpuRequest: "100m"
         memoryRequest: "64Mi"
       restartPolicy: "Never"
+```
+
+### Serverless Setup with Spanner
+
+```bash
+# functions/highlander/config.yaml
+storageType: "spanner"
+spanner:
+  projectID: "my-gcp-project"
+  instanceID: "highlander-instance" 
+  databaseID: "highlander-db"
+
+# Deploy as Cloud Function
+make setup        # One-time Spanner setup
+make deploy-dev   # Deploy function
+make test-real    # Test deployment
+
+# Access dashboard
+FUNCTION_URL=$(make get-url-dev)
+open $FUNCTION_URL
 ```
 
 ### Multi-Tenant Setup
@@ -489,6 +597,18 @@ K8 Highlander will detect the deletion and safely shut down and remove the corre
 
 K8 Highlander includes helper scripts to simplify CRD management:
 
+# Cloud Function deployment
+```bash
+cd functions/highlander
+make test-emulator    # Free testing first
+make setup           # Real Spanner setup (costs money)
+make deploy-dev      # Deploy function
+make test-real       # Test everything
+
+# Verify setup
+./verify-setup.sh
+```
+
 #### Create a CronJob Workload
 
 ```bash
@@ -618,6 +738,7 @@ run stateful workloads in Kubernetes with confidence, knowing that exactly one i
 - [Configuration Reference](docs/configuration.md)
 - [Metrics Reference](docs/metrics.md)
 - [Deployment Strategies](docs/deployment.md)
+- [Cloud Function Architecture](functions/highlander/README.md) for serverless deployment details.
 
 ---
 

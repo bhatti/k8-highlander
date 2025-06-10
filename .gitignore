@@ -29,4 +29,5 @@ go.work.sum
 
 .idea/
 *.bak
+vendor
 TODO

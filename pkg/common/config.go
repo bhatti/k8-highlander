@@ -47,6 +47,7 @@
 package common
 
 import (
+	"cloud.google.com/go/spanner"
 	"context"
 	"fmt"
 	"github.com/go-redis/redis/v8"
@@ -55,6 +56,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/clientcmd/api"
@@ -66,8 +68,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"k8s.io/client-go/kubernetes"
 )
 
 // ClusterConfig holds configuration for a Kubernetes cluster
@@ -149,8 +149,13 @@ type StorageType string
 const (
 	// StorageTypeRedis represents Redis storage
 	StorageTypeRedis StorageType = "redis"
+
 	// StorageTypeDB represents database storage
 	StorageTypeDB StorageType = "db"
+
+	// StorageTypeSpanner represents Google Cloud Spanner storage
+	StorageTypeSpanner StorageType = "spanner"
+
 	// StorageTypeMemory represents database storage
 	StorageTypeMemory StorageType = "memory"
 )
@@ -165,6 +170,9 @@ type StorageConfig struct {
 
 	// Database configuration
 	DBClient *gorm.DB
+
+	// Spanner configuration
+	SpannerClient *spanner.Client
 }
 
 // AppConfig defines the application configuration
@@ -184,6 +192,13 @@ type AppConfig struct {
 		Password string `yaml:"password" env:"REDIS_PASSWORD"`
 		DB       int    `yaml:"db"`
 	} `yaml:"redis"`
+
+	// Spanner configuration
+	Spanner struct {
+		ProjectID  string `yaml:"projectID" env:"SPANNER_PROJECT_ID"`
+		InstanceID string `yaml:"instanceID" env:"SPANNER_INSTANCE_ID"`
+		DatabaseID string `yaml:"databaseID" env:"SPANNER_DATABASE_ID"`
+	} `yaml:"spanner"`
 
 	DatabaseURL string `yaml:"databaseURL" env:"DATABASE_URL"`
 
@@ -232,6 +247,26 @@ func (c *AppConfig) BuildStorageConfig() (_ *StorageConfig, err error) {
 		return &StorageConfig{
 			Type:     StorageTypeDB,
 			DBClient: dbClient,
+		}, nil
+	case StorageTypeSpanner:
+		if c.Spanner.ProjectID == "" || c.Spanner.InstanceID == "" || c.Spanner.DatabaseID == "" {
+			return nil, NewSevereErrorMessage("AppConfig",
+				"Spanner projectID, instanceID, and databaseID are required for Spanner storage")
+		}
+		spannerDB := fmt.Sprintf("projects/%s/instances/%s/databases/%s",
+			c.Spanner.ProjectID, c.Spanner.InstanceID, c.Spanner.DatabaseID)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		spannerClient, err := spanner.NewClient(ctx, spannerDB)
+		if err != nil {
+			return nil, NewSevereError("AppConfig", fmt.Sprintf("failed to create Spanner client for %s", spannerDB), err)
+		}
+		klog.Infof("Connected to Spanner database: %s", spannerDB)
+		return &StorageConfig{
+			Type:          StorageTypeSpanner,
+			SpannerClient: spannerClient,
 		}, nil
 	default:
 		return nil, NewSevereErrorMessage("AppConfig", fmt.Sprintf("unsupported storage type: %s", c.StorageType))
@@ -352,6 +387,9 @@ func initConfigFromFile(cfgFile string) (appConfig AppConfig, err error) {
 	_ = viper.BindEnv("databaseURL", "HIGHLANDER_DATABASE_URL")
 	_ = viper.BindEnv("cluster.kubeconfig", "HIGHLANDER_KUBECONFIG")
 	_ = viper.BindEnv("cluster.name", "HIGHLANDER_CLUSTER_NAME")
+	_ = viper.BindEnv("spanner.projectID", "HIGHLANDER_SPANNER_PROJECT_ID")
+	_ = viper.BindEnv("spanner.instanceID", "HIGHLANDER_SPANNER_INSTANCE_ID")
+	_ = viper.BindEnv("spanner.databaseID", "HIGHLANDER_SPANNER_DATABASE_ID")
 
 	if cfgFile != "" {
 		// Use config file from the flag.
@@ -431,6 +469,14 @@ func initConfigFromFile(cfgFile string) (appConfig AppConfig, err error) {
 	klog.Infof("Namespace: %s", appConfig.Namespace)
 	klog.Infof("Cluster Name: %s", appConfig.Cluster.Name)
 	klog.Infof("Cluster Kubeconfig: %s", appConfig.Cluster.Kubeconfig)
+	if appConfig.StorageType == StorageTypeSpanner {
+		klog.Infof("Spanner Project: %s, Instance: %s, Database: %s",
+			appConfig.Spanner.ProjectID, appConfig.Spanner.InstanceID, appConfig.Spanner.DatabaseID)
+	} else if appConfig.StorageType == StorageTypeDB {
+		klog.Infof("DB: %s", appConfig.DatabaseURL)
+	} else if appConfig.StorageType == StorageTypeRedis {
+		klog.Infof("Redis: %s", appConfig.Redis.Addr)
+	}
 
 	// Validate the configuration
 	if err = appConfig.Validate(); err != nil {
@@ -479,6 +525,16 @@ func applyEnvironmentOverrides(config *AppConfig) {
 		if db, err := strconv.Atoi(envRedisDB); err == nil {
 			config.Redis.DB = db
 		}
+	}
+
+	if envSpannerProjectID := os.Getenv("HIGHLANDER_SPANNER_PROJECT_ID"); envSpannerProjectID != "" {
+		config.Spanner.ProjectID = envSpannerProjectID
+	}
+	if envSpannerInstanceID := os.Getenv("HIGHLANDER_SPANNER_INSTANCE_ID"); envSpannerInstanceID != "" {
+		config.Spanner.InstanceID = envSpannerInstanceID
+	}
+	if envSpannerDatabaseID := os.Getenv("HIGHLANDER_SPANNER_DATABASE_ID"); envSpannerDatabaseID != "" {
+		config.Spanner.DatabaseID = envSpannerDatabaseID
 	}
 
 	if envDatabaseURL := os.Getenv("HIGHLANDER_DATABASE_URL"); envDatabaseURL != "" {

@@ -1,0 +1,56 @@
+steps:
+  # Prepare static files
+  - name: 'ubuntu'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cd functions/highlander
+        mkdir -p static
+        if [ -d "../../static" ]; then
+          cp -r ../../static/* static/
+        elif [ -d "../../dashboard" ]; then
+          cp -r ../../dashboard/* static/
+        fi
+        ls -la static/
+
+  # Test the function
+  - name: 'golang:1.21'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cd functions/highlander
+        go mod download
+        go mod tidy
+        go test ./...
+        go build -o bin/function .
+
+  # Deploy the function
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cd functions/highlander
+        gcloud functions deploy highlander-api \
+          --gen2 \
+          --runtime=go121 \
+          --region=us-central1 \
+          --source=. \
+          --entry-point=HighlanderAPI \
+          --trigger=http \
+          --env-vars-file=.env.${_ENVIRONMENT}.yaml \
+          --service-account=highlander-cf@${PROJECT_ID}.iam.gserviceaccount.com \
+          --memory=1GB \
+          --timeout=540s \
+          --max-instances=100 \
+          --project=${PROJECT_ID}
+
+substitutions:
+  _ENVIRONMENT: 'prod'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  
+timeout: 1200s
